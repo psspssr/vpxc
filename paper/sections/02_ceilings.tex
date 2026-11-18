@@ -1,0 +1,54 @@
+\section{Six Structural Ceilings of Classical and Neural Lossless SOTA}
+\label{sec:ceilings}
+
+\subsection{Causal Half-Plane Szeg\H{o}--Whittle Invariance vs.\ Singularity Surprise}
+For any stationary Gaussian field on $\Z^2$ with spectral density $S(\omega_1,\omega_2)$ satisfying $\ln S \in L^1([-\pi,\pi)^2)$, the 2D \textbf{Szeg\H{o}--Whittle--Helson--Lowdenslager theorem}~\citep{whittle1954,helson1958} establishes that for \emph{every} total-order causal half-plane $\mathcal{H}_\prec \subset \Z^2 \setminus \{0\}$, the minimum one-step linear prediction variance equals the global block-entropy innovation variance:
+\begin{equation}
+  \sigma_\infty^2 = \inf_{a \in \ell^2(\mathcal{H}_\prec)} \E\!\left[\Big(X_0 - \sum_{u \in \mathcal{H}_\prec} a_u X_u\Big)^{\!2}\right]
+  = \exp\!\left(\frac{1}{4\pi^2}\iint_{[-\pi,\pi)^2} \ln S(\omega_1,\omega_2)\,d\omega_1\,d\omega_2\right).
+\end{equation}
+Numerically, on a toroidal Gaussian field $S(\omega) = (0.02 + \Delta_{\mathrm{grid}})^{-1} + 0.02$, a 4-tap raster predictor sits within $+0.0092\bpsp$ of the exact Szeg\H{o}--Whittle rate, virtually indistinguishable from multiscale quincunx ($+0.0106\bpsp$). \emph{Stationary linear smoothness offers zero scan-order gain.}
+
+Natural images, however, are \textbf{non-stationary Mumford--Shah / jump-diffusion fields}~\citep{mumford1989} partitioned by unobserved 1D singularity curves $\Gamma \subset \R^2$ (edge arrival rate $p_e$, smooth innovation $\sigma_{\mathrm{sm}}^2$, jump variance $\sigma_J^2 \gg \sigma_{\mathrm{sm}}^2$). Any causal scan (\texttt{JPEG-LS}, \texttt{CALIC}, \texttt{PixelCNN++}, byte/token LLMs) approaches $\Gamma$ blindly from one side, paying binary contour-location entropy $H_2(p_e)$ plus heavy-tail scale broadening $(1-p_e)\mathcal{N}(\mu^-,\sigma_{\mathrm{sm}}^2) + p_e\mathcal{N}(\mu^-,\sigma_{\mathrm{sm}}^2+\sigma_J^2)$ at \emph{every scanline crossing} ($O(|\partial\Gamma|)$). Coarse-to-fine bridge conditioning observes $(u-h, u+h)$ bilaterally, collapsing smooth interior variance to $\frac{1}{2}\sigma_{\mathrm{sm}}^2$ and bracketing jumps in $O(\log N)$ parallel stages. On a calibrated jump-diffusion benchmark ($p_e=0.06,\sigma_{\mathrm{sm}}=1.5,\sigma_J=40.0$, Bayes floor $3.1869\bpsp$), causal unimodal prediction pays $5.3563\bpsp$ ($+2.1694\bpsp$ surprise), whereas coarse-to-fine sheaf line-process bimodal interpolation achieves $3.7395\bpsp$ (\textbf{$-1.6168\bpsp$ recovered}).
+
+\subsection{The ISP, Bayer CFA, and Chroma-Subsampling Acquisition Submanifold}
+Rendered RGB24 photographs $X = \round{\gamma(\mathrm{CCM}\cdot \mathcal{D}_{p_{\mathrm{CFA}}}(I_{\mathrm{raw}}))} \in \Z_{256}^{H\times W\times 3}$ are generated from at most $HW$ scalar Bayer CFA measurements~\citep{malvar2004demosaic} ($\frac{1}{2}HW$ Green on quincunx coset $\Lambda_0^{(p_{\mathrm{CFA}})}$, $\frac{1}{4}HW$ Red, $\frac{1}{4}HW$ Blue) or $1.5\,HW$ \texttt{PhotoYCC} 4:2:0 samples (all 24 Kodak \texttt{PCD0992} images originate from 4:2:0 \texttt{PhotoYCC}). Consequently, \textbf{$50\%\text{--}66.7\%$ of rendered RGB sub-pixels occupy a $\pm 0.5\;\mathrm{LSB}$ quantization tube $\mathcal{T}_{1/2}(\mathcal{M}_{\phi_{\mathrm{acq}}})$ around a low-dimensional acquisition submanifold}. Phase-blind trees (\texttt{JPEG~XL}, \texttt{FLIF}) and dataset-pooled zero-shot CNNs (\texttt{L3C}, \texttt{HPAC}) marginalize over the 4 Bayer coset phases and ISP tone curves: on 1:1 Malvar--He--Cutler demosaiced RGB ($\sigma_{\mathrm{shot}}=2.0$), ISP-blind prediction requires $5.5456\,\mathrm{bits}$ on interpolated Green sites versus $0.6879\,\mathrm{bits}$ under a 6-parameter analytical ISP kernel (\textbf{$-2.4288\bpsp$ net Green savings}). This provenance also explains why \texttt{HPAC-FT} gains $-0.21\bpsp$ on Kodak ($2.73\to 2.52$) versus $-0.04\bpsp$ on \texttt{CLIC.p}: $8.45\,\mathrm{s}$ of SGD implicitly re-learns Kodak's \texttt{PhotoYCC} chroma phase.
+
+\subsection{Physical Shot-Noise Floor and the \texorpdfstring{$+0.500\bpsp$}{+0.500 bpsp} Patch-Subtraction Penalty}
+Raw photon counts follow $I_{\mathrm{raw}}(u) = \mathrm{Poisson}(\alpha\Phi(u)) + \mathcal{N}(0,\sigma_{\mathrm{read}}^2)$, imposing an incompressible local noise floor $h_\eta(u) = \frac{1}{2}\log_2(2\pi e\,\sigma_\eta^2(u))$. Exact copy/subtraction primitives (\texttt{PNG}/\texttt{WebP-L} LZ77, \texttt{AVIF} \texttt{IntraBC}, \texttt{JPEG~XL} \texttt{Patches}) form $x(u) - x(u-\tau)$, \textbf{doubling independent sensor noise variance} ($\Var(\eta_1 - \eta_2) = 2\sigma_\eta^2$) and incurring an exact $+\frac{1}{2}\log_2 2 = +0.500\bpsp$ penalty above $h_\eta(u)$ whenever $\sigma_\eta > 0$.
+
+\subsection{Rounding-Induced Total Correlation (\texttt{RITC}) in Deep Integer Flows}
+\begin{theorem}[Rounding-Induced Total Correlation]
+\label{thm:ritc}
+Every bijection $T: \Z^N \to \Z^N$ is a permutation of countable support and satisfies $H(T(X)) = H(X)$ identically. Under $G$-stage group-factorized coding $Q_Z(z) = \prod_{g=1}^G \prod_{i \in g} Q_i(z_i \mid z_{<g})$, expected codelength satisfies
+\begin{equation}
+  \E[L(X)] = H(X) + \sum_{g=1}^G \TC(Z_g \mid Z_{<g}) + \sum_{g=1}^G \sum_{i \in g} \E\!\Big[\KL\!\big(P(Z_i \mid Z_{<g}) \,\|\, Q_i(Z_i \mid Z_{<g})\big)\Big].
+\end{equation}
+Composing $M \gg 2$ nonlinear integer lifting steps $z^{(m)} = z^{(m-1)} \pm \round{f_m(z^{(m-1)})}$ injects rounding innovations $\epsilon_m \in [-0.5, 0.5)$ whose marginal variance growth $\approx \sum_m c_m/12$ cannot alter $H(Z^{(M)}) = H(X)$ and therefore converts \textbf{entirely into deterministic pseudo-random cross-band total correlation $\TC(Z_g \mid Z_{<g})$}.
+\end{theorem}
+
+\Cref{tab:ritc-audit} verifies \Cref{thm:ritc} on $2\times 10^5$ bivariate discrete Gaussian samples ($\sigma=18.0,\rho=0.94$), explaining why deep nonlinear integer lifting in \texttt{iWave++}~\citep{ma2020iwave} ($3.96\bpsp$ Kodak) degrades severely relative to shallow \texttt{JPEG~XL} ($2.87\bpsp$).
+
+\begin{table}[htbp]
+\centering
+\caption{Numerical verification of \Cref{thm:ritc} (\texttt{RITC}): joint discrete entropy is strictly invariant across depth $M$, while stacked nonlinear rounding inflates factorized codelength.}
+\label{tab:ritc-audit}
+\vspace{2pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Integer Lifting Depth} & $H(Z_1, Z_2)$ (\textbf{bits}) & $H(Z_1) + H(Z_2)$ (\textbf{bits}) & $\TC(Z_1; Z_2)$ (\textbf{bits}) & \textbf{Excess Penalty ($\bpsp$)} \\
+\midrule
+Original $(X_1, X_2)$ (untransformed) & $10.8667$ & $12.4378$ & $1.5711$ & $+0.7856$ \\
+Shallow $L=1$ (1-predict, 1-update linear lift) & $\mathbf{10.8667}$ & $\mathbf{10.9073}$ & $\mathbf{0.0406}$ & $\mathbf{+0.0203}$ \\
+Stacked nonlinear integer lifting $M = 2$ & $10.8667$ & $11.2472$ & $0.3805$ & $+0.1903$ \\
+Stacked nonlinear integer lifting $M = 4$ & $10.8667$ & $11.6469$ & $0.7802$ & $+0.3901$ \\
+Stacked nonlinear integer lifting $M = 8$ & $10.8667$ & $11.8908$ & $1.0241$ & $+0.5120$ \\
+Stacked nonlinear integer lifting $M = 12$ & $10.8667$ & $12.0436$ & $1.1769$ & $+0.5885$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\subsection{IEEE-754 Drift in \texttt{rANS} and Sequential/SGD Compute Bottlenecks}
+In \texttt{rANS}~\citep{duda2013rans}, state updates obey $s_{t+1} = M\lfloor s_t/f_k\rfloor + c_k + (s_t \bmod f_k)$. Even a $1\text{-ULP}$ encoder/decoder discrepancy in $f_k$ (from non-associative FP16/FP32 SIMD reductions, FMA contraction, or \texttt{expf} drift across x86/ARM/CUDA) alters $s_{t+1} \bmod M$ with probability $\ge 1 - 1/M$, corrupting all subsequent symbols. Meanwhile, pixel-serial AR models require $O(HW)$ sequential launches, and \texttt{HPAC-FT}/\texttt{CALLIC} require hundreds of GPU backward passes per image.
