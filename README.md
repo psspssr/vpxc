@@ -2,6 +2,17 @@
 
 `vpxc` explores next-generation **exact, deterministic, hardware-parallel lossless image compression** on $\mathbb{Z}_M^{H \times W \times C}$ engineered to surpass both classical SOTA (`JPEG XL Modular -e 9`, `FLIF/MANIAC`) and neural SOTA (`HPAC`, `HPAC-FT`, `CALLIC`, `ArIB-BPS`) without test-time backpropagation or floating-point non-determinism.
 
+The Python package in `src/vpxc` is the **SLGF-Zero** codec: the integer, zero-weight part of that specification. It round-trips `uint8` and `uint16` images exactly. The rate and latency numbers in the projection table below are research targets for the full model, not measurements of this package. Measured rates are in [Measured SLGF-Zero rates](#measured-slgf-zero-rates).
+
+```bash
+PYTHONPATH=src python3 -m vpxc roundtrip photo.png
+PYTHONPATH=src python3 -m vpxc encode photo.png photo.vpxc
+PYTHONPATH=src python3 -m vpxc decode photo.vpxc photo.png
+PYTHONPATH=src python3 -m unittest tests.test_slgf
+```
+
+`numpy` is required. Loading PNG and JPEG files from the command line also needs `pillow`.
+
 ---
 
 ## Core Mathematical Thesis
@@ -29,8 +40,30 @@ Existing lossless codecs leave **$0.35\text{--}0.55\;\mathrm{bpsp}$** ($1.05\tex
 
 ---
 
+## Measured SLGF-Zero rates
+
+SLGF-Zero encodes each tile with the smallest of a raw bypass, a median-edge raster coder, a causal Sheaf-Kalman blend (`M ≤ 4`), a palette (at most 256 colors), and a 4-level quincunx tower. The tower uses one predict/update step per scale, either a flat neighbor mean or an integer sheaf weight, and codes detail bands with adaptive Rice or a 66-bin Dyadic-Core66 rANS table. Channel mixing is an exact lift: identity, YCoCg-R, subtract-base, or a Q12 shear.
+
+On six Kodak lossless photographs (512×768 RGB), optimized PNG averaged about **4.76 bpsp** and SLGF-Zero averaged about **3.68 bpsp** (about 11.0 bits per pixel). Every image decoded to the same pixels. Encode took about 8–11 seconds and decode about 1.3–1.7 seconds per image in pure Python.
+
+| Image | SLGF-Zero (bpsp) | PNG optimize (bpsp) |
+| :--- | ---: | ---: |
+| `kodim01` | 3.814 | 5.279 |
+| `kodim05` | 4.081 | 5.471 |
+| `kodim07` | 3.218 | 3.834 |
+| `kodim13` | 4.357 | 6.032 |
+| `kodim15` | 3.380 | 4.146 |
+| `kodim23` | 3.227 | 3.777 |
+
+Two further photographs were checked after a JPEG decode, so their samples are already quantized and are not comparable to the Kodak lossless numbers: a monarch butterfly (720×960, 2.793 vs 3.582 bpsp PNG) and the Matterhorn (640×960, 2.716 vs 3.746 bpsp PNG). Both round-tripped exactly, as did the luminance plane of `kodim07` (4.018 vs 4.138 bpsp).
+
+Still specification-only, and covered by the falsification gates rather than this codec: trained `I-SSM` weights, a fractional Student-t mixture, split-lattice bits-back, the closed-form 64-dimensional residual head, and the ISP/CFA acquisition header. The integer `I-SSM` scan, the `SL(3)` WSIL map, and Dyadic-Core66 rANS are implemented and tested; they are not yet the full Stage-2/Stage-3 model those gates describe.
+
+---
+
 ## Repository Contents
 
+- `src/vpxc/` — **SLGF-Zero codec:** reversible channel lifts, quincunx sheaf lifting, causal Sheaf-Kalman, adaptive Rice, Dyadic-Core66 rANS, and the normative integer `I-SSM` scan. `tests/test_slgf.py` checks exact inversion. `tests/test_real_images.py` round-trips photographs when `VPXC_IMAGE_DIR` points at them.
 - [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) — **Typeset Publication-Grade Specification (PDF):** complete mathematical monograph, TikZ pipeline diagram, theorems, numerical rate audits, normative integer operator equations, and bibliography.
 - [`paper/`](./paper/) — **Modular LaTeX Source (`main.tex`, `sections/*.tex`, `refs.bib`, `Makefile`):** reproducible `latexmk` build generating `docs/vpxc-slgf-specification.pdf`.
 - [`docs/frontier-lossless-image-compression.md`](./docs/frontier-lossless-image-compression.md) — **Primary Research Specification (Markdown):** structural ceilings of classical/neural SOTA, six $\mathbb{Z}^d$ mathematical frameworks, flagship `SLGF` architecture, proofs of bijectivity & minimax MDL rate bounds, comparison against three alternative frontier paradigms (`Q-NLL-LoRA`, `H-BB-VDVAE`, `MG-MANIAC-OT`), failure modes, normative integer equations, and 5-gate falsification roadmap.

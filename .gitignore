@@ -1,3 +1,10 @@
+# Python & codec artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.vpxc
+.venv/
+
 # LaTeX build and auxiliary artifacts
 *.aux
 *.bbl
