@@ -1,0 +1,15 @@
+[project]
+name = "vpxc"
+version = "0.1.0"
+description = "SLGF-Zero lossless image codec"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22"]
+
+[project.optional-dependencies]
+images = ["pillow>=9"]
+
+[project.scripts]
+vpxc = "vpxc.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
