@@ -1,0 +1,44 @@
+\section{Introduction and Empirical SOTA Baselines}
+\label{sec:intro}
+
+Lossless image compression maps a finite discrete array $X \in \Z_M^{H \times W \times C}$ ($M = 2^B$, typically $B \in \{8,12,14,16\}$ and $C \in \{1,3,4\}$) bijectively onto a prefix-free binary string $\mathcal{B}(X) \in \{0,1\}^*$ minimizing expected codelength $\E[|\mathcal{B}(X)|]$. Across the literature, two rate conventions coexist for $C$-channel images:
+\begin{equation}
+  \mathrm{bpsp} \triangleq \frac{|\mathcal{B}(X)|}{H \cdot W \cdot C} \quad \text{(bits per sub-pixel)}, \qquad
+  \mathrm{bpp} \triangleq \frac{|\mathcal{B}(X)|}{H \cdot W} = C \cdot \mathrm{bpsp} \quad \text{(bits per pixel)},
+\end{equation}
+so uncompressed 8-bit RGB24 corresponds to $8.00\bpsp = 24.00\bpp$.
+
+Over three decades of classical engineering---from scanline predictors (\texttt{PNG}), Median Edge Detection in \texttt{JPEG-LS}~\citep{weinberger2000jpegls}, Gradient-Adjusted Prediction in \texttt{CALIC}~\citep{wu1997calic}, reversible LeGall 5/3 wavelets in \texttt{JPEG~2000}~\citep{taubman2002jpeg2000}, and 2D backward references in \texttt{WebP-L}/\texttt{AVIF}, to \texttt{MANIAC} decision trees in \texttt{FLIF}~\citep{sneyers2016flif} and \texttt{Squeeze}+\texttt{MA}+\texttt{rANS} in \texttt{JPEG~XL}~\citep{alakuijala2019jpegxl,duda2013rans}---classical rates on Kodak have converged near $2.87\bpsp$. Conversely, neural codecs---hierarchical priors (\texttt{L3C}~\citep{mentzer2019l3c}, \texttt{SReC}~\citep{cao2020srec}), deep integer lifting (\texttt{iWave++}~\citep{ma2020iwave}), discrete flows and bits-back coders (\texttt{IDF}~\citep{hoogeboom2019idf}, \texttt{iFlow}~\citep{zhang2021iflow}, \texttt{BB-ANS}~\citep{townsend2019bbans}, \texttt{Bit-Swap}~\citep{kingma2019bitswap}), lossy-plus-residual/bit-plane autoregression (\texttt{DLPR}~\citep{bai2024dlpr}, \texttt{ArIB-BPS}~\citep{zhang2024arib}), and test-time SGD fine-tuned ConvNets (\texttt{CALLIC}~\citep{callic2025}, \texttt{HPAC}/\texttt{HPAC-FT}~\citep{hpac2025})---reach $2.52\bpsp$ only via multi-second per-image GPU backpropagation and non-deterministic floating-point arithmetic (\Cref{tab:sota-baselines}).
+
+\begin{table}[htbp]
+\centering
+\caption{Normalized empirical lossless compression baselines ($\bpsp$ / $\bpp$ for RGB24; $\bpsp$ for grayscale/CT).}
+\label{tab:sota-baselines}
+\vspace{2pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llcccccc@{}}
+\toprule
+\textbf{Codec} & \textbf{Core Paradigm} & \textbf{Kodak} & \textbf{DIV2K} & \textbf{CLIC.p} & \textbf{CLIC.m} & \textbf{Doc24} & \textbf{CT 12--16b} \\
+\midrule
+\texttt{PNG} (opt) & Scanline Paeth + LZ77 + Huffman & 4.35 / 13.05 & 4.23 / 12.69 & 3.93 / 11.79 & 3.88 / 11.64 & --- & --- \\
+\texttt{AVIF} (lossless) & AV1 Intra + WHT + \texttt{IntraBC} & 4.01 / 12.04 & 3.55 / 10.65 & 3.24 / 9.72 & 2.96 / 8.87 & --- & --- \\
+\texttt{JPEG-LS}~\citep{weinberger2000jpegls} & MED + 365 gradient ctx + Golomb & 3.16 / 9.48 & 2.99 / 8.97 & 2.82 / 8.46 & 2.53 / 7.59 & --- & --- \\
+\texttt{JPEG 2000}~\citep{taubman2002jpeg2000} & Reversible 5/3 DWT + EBCOT & 3.19 / 9.57 & 3.12 / 9.36 & 2.93 / 8.79 & 2.71 / 8.13 & 2.53 & 6.42 / 5.31 \\
+\texttt{WebP-L} (\texttt{-z 9}) & SubtractGreen + LZ77 + ColorCache & 3.18 / 9.54 & 3.11 / 9.33 & 2.90 / 8.70 & 2.73 / 8.19 & --- & --- \\
+\texttt{FLIF}~\citep{sneyers2016flif} & Interlaced zoom + MANIAC trees & 2.90 / 8.70 & 2.91 / 8.73 & 2.72 / 8.16 & 2.48 / 7.44 & 2.54 & 4.85 / 5.21 \\
+\texttt{JPEG XL} (\texttt{-e 9})~\citep{alakuijala2019jpegxl} & \texttt{RCT} + \texttt{Squeeze} + \texttt{Patches} + MA + rANS & 2.87 / 8.61 & 2.79 / 8.37 & 2.63 / 7.89 & 2.40 / 7.20 & 2.30 & 4.65 / 4.99 \\
+\midrule
+\texttt{L3C}~\citep{mentzer2019l3c} & 3-scale hierarchical CNN prior & 3.26 / 9.78 & 3.09 / 9.27 & 2.94 / 8.82 & 2.64 / 7.92 & 3.26 & --- \\
+\texttt{iWave++}~\citep{ma2020iwave} & Deep nonlinear CNN integer lifting & 3.96 / 11.87 & --- & 3.45 / 10.34 & 3.50 / 10.51 & --- & --- \\
+\texttt{iFlow}~\citep{zhang2021iflow} & Modular scale + uniform BB flow & --- & 2.57 / 7.71 & 2.44 / 7.32 & 2.26 / 6.78 & --- & --- \\
+\texttt{DLPR}~\citep{bai2024dlpr} & Lossy VAE + masked AR residual & 2.86 / 8.58 & 2.55 / 7.65 & 2.38 / 7.14 & 2.16 / 6.48 & 2.68 & --- \\
+\texttt{ArIB-BPS}~\citep{zhang2024arib} & Bit-plane slice + multi-scale AR & 2.78 / 8.34 & 2.55 / 7.65 & 2.42 / 7.26 & --- & 2.62 & --- \\
+\texttt{HPAC} (0-shot)~\citep{hpac2025} & Hierarchical parallel AR ConvNet & 2.73 / 8.19 & 2.52 / 7.56 & 2.38 / 7.14 & --- & 2.46 & 4.27 / 4.96 \\
+\texttt{CALLIC} (FT)~\citep{callic2025} & Per-image instance AR fine-tuning & 2.54 / 7.62 & --- & --- & --- & --- & --- \\
+\texttt{HPAC-FT}~\citep{hpac2025} & \texttt{HPAC} + per-image LoRA SGD ($8.45\,\mathrm{s}$) & \textbf{2.52 / 7.56} & \textbf{2.47 / 7.41} & \textbf{2.34 / 7.02} & --- & \textbf{1.94} & \textbf{4.27 / 4.74} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The central thesis of \texttt{vpxc} is that beating both \texttt{JPEG~XL} and \texttt{HPAC-FT} without test-time SGD requires attacking the \emph{exact information-theoretic mechanisms} where current codecs pay structural KL divergence: non-stationary contour bracketing, camera ISP/CFA submanifolds, sensor shot-noise fusion, integer rounding total correlation, and deterministic fixed-point long-range state-space context.

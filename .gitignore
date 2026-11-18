@@ -1,0 +1,16 @@
+# LaTeX build and auxiliary artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.log
+*.lot
+*.nav
+*.out
+*.snm
+*.synctex.gz
+*.toc
+*.xdv
+paper/build/

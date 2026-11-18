@@ -1,0 +1,68 @@
+\section{Rate Projections, Failure Modes, and Falsification Roadmap}
+\label{sec:roadmap}
+
+\subsection{Conservative Sub-Additive Rate-Reduction Audit}
+Because spatial, spectral, and non-local predictors share mutual information, raw mechanism gains cannot be summed naively. Applying an explicit $0.62\times$ overlap discount ($\approx +38\%$ sub-additivity give-back) yields conservative rate targets across six standard benchmarks (\Cref{tab:rate-budget}).
+
+\begin{table}[htbp]
+\centering
+\caption{Sub-additive rate-reduction budget ($\bpsp$) relative to \texttt{JPEG~XL (-d~0 -e~9)} and \texttt{HPAC-FT}.}
+\label{tab:rate-budget}
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\textbf{Mechanism / Component} & \textbf{Kodak} & \textbf{DIV2K} & \textbf{CLIC.p} & \textbf{CLIC.m} & \textbf{Doc24} & \textbf{CT 16b} \\
+\midrule
+\textbf{\texttt{JPEG XL (-d 0 -e 9)} Baseline} & $\mathbf{2.87}$ & $\mathbf{2.79}$ & $\mathbf{2.63}$ & $\mathbf{2.40}$ & $\mathbf{2.30}$ & $\mathbf{4.82}$ \\
+Stage 0: $\phi_{\mathrm{acq}}$ ISP/CFA/4:2:0 + $\SL(C)$-\texttt{WSIL} & $-0.19$ & $-0.11$ & $-0.10$ & $-0.11$ & $-0.04$ & $-0.03$ \\
+Stage 1: Quincunx Sheaf Bimodal Edge Bridges & $-0.14$ & $-0.16$ & $-0.15$ & $-0.14$ & $-0.18$ & $-0.38$ \\
+Stage 2a: $D_8$ Sheaf-Kalman OT Fusion ($M=8$) & $-0.09$ & $-0.14$ & $-0.11$ & $-0.09$ & $-0.22$ & $-0.16$ \\
+Stage 2b: 4-Way \texttt{I-SSM} + Closed-Form $\phi_{\mathrm{head}}$ & $-0.13$ & $-0.16$ & $-0.15$ & $-0.13$ & $-0.14$ & $-0.24$ \\
+Stage 3: \texttt{S\textsuperscript{3}-BB-rANS} + \texttt{Dyadic-Core66} Student-$t$ & $-0.05$ & $-0.06$ & $-0.05$ & $-0.04$ & $-0.03$ & $-0.12$ \\
+\emph{Sub-Additivity / Overlap Discount ($\approx +38\%$)} & $+0.13$ & $+0.13$ & $+0.12$ & $+0.11$ & $+0.12$ & $+0.11$ \\
+\midrule
+\textbf{Projected \texttt{SLGF} (\texttt{vpxc}) Net Rate} & $\mathbf{2.40 \pm .04}$ & $\mathbf{2.29 \pm .04}$ & $\mathbf{2.19 \pm .04}$ & $\mathbf{2.00 \pm .04}$ & $\mathbf{1.81 \pm .06}$ & $\mathbf{4.00 \pm .08}$ \\
+Net Reduction vs.\ \texttt{JPEG XL (-e 9)} & $-16.4\%$ & $-17.9\%$ & $-16.7\%$ & $-16.7\%$ & $-21.3\%$ & $-17.0\%$ \\
+Net Reduction vs.\ \texttt{HPAC-FT} ($>100\times$ faster enc.) & $-4.8\%$ & $-7.3\%$ & $-6.4\%$ & --- & $-6.7\%$ & $-11.1\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Six Concrete Failure Modes and Mathematical Guarantees}
+\begin{enumerate}
+  \item \textbf{Lanczos-Resized or Lossy-Recompressed Inputs:} Downsampling mixes mod-2 CFA cosets. \emph{Guarantee:} $\phi_{\mathrm{acq}}$ checks exact MDL savings $\Delta L_{\mathrm{MDL}} < 0$; otherwise a 1-bit flag bypasses parity taps ($1\,\mathrm{bit}$ worst-case cost).
+  \item \textbf{Tiny Icons ($H\times W < 64\times 64$):} Active header DOFs scale as $K_{\mathrm{eff}} \le \lfloor 0.002\cdot HWC\rfloor$, shrinking headers to $24\,\mathrm{bytes}$.
+  \item \textbf{Sparse-Histogram UI / Pixel Art:} Stage~0 activates zero-rounding \texttt{Palette} + identity lifting; $\sigma_\eta \to 0$ collapses Sheaf-Kalman to exact $D_8$ block copy.
+  \item \textbf{Photon-Starved High-ISO / Low-Dose CT ($\sigma_\eta \gg \sigma_{\mathrm{sig}}$):} $\chi^2_{0.99,d}$ Mahalanobis gating rejects spurious noise matches, reverting to Anscombe-stabilized local Student-$t$ coding.
+  \item \textbf{Incompressible / Cryptographic White Noise:} Per-tile raw bypass caps worst-case expansion at $\le 2\,\mathrm{bits/tile}$ ($< +3\times 10^{-6}\bpsp$ on $512\times 512$ tiles).
+  \item \textbf{16-Bit Dynamic Range Overflow:} \texttt{WSIL} widens intermediates to \texttt{INT32} ($|y_0|<2^{18}$), \texttt{I-SSM} multiplies in \texttt{INT64} before shifts, and \texttt{Dyadic-Core66} adapts $b(\sigma) \in \{0,\dots,12\}$.
+\end{enumerate}
+
+\subsection{Falsifiable Five-Gate Experimental Roadmap (\texttt{G0}--\texttt{G4})}
+\begin{itemize}
+  \item \textbf{Gate \texttt{G0} (Cross-ISA Bijectivity Torture Suite):} Verify $\mathrm{SHA256}(\mathrm{Dec}(\mathrm{Enc}(X))) = \mathrm{SHA256}(X)$ across $10^4$ fuzz tensors (8--16-bit, white noise, $1\times 1$ to $8192\times 8192$) simultaneously on \texttt{x86\_64 AVX-512}, \texttt{ARM64 NEON}, and \texttt{CUDA} ($0$ mismatches tolerated).
+  \item \textbf{Gate \texttt{G1} (Zero-Weight Baseline \texttt{SLGF-Zero}):} Validate $\phi_{\mathrm{acq}}$ + $\SL(3)$-\texttt{WSIL} + Quincunx Sheaf + Sheaf-Kalman with pure tree coding; target $\le 2.72\bpsp$ Kodak and $\le 2.51\bpsp$ \texttt{CLIC.p} ($\ge 0.12\text{--}0.15\bpsp$ below \texttt{JPEG~XL}).
+  \item \textbf{Gate \texttt{G2} (Normative \texttt{I-SSM} + Closed-Form $\phi_{\mathrm{head}}$):} Train $1.8\,\mathrm{MB}$ quantized \texttt{I-SSM} backbone + Cholesky $\phi_{\mathrm{head}}$; target $\le 2.46\bpsp$ Kodak and $\le 2.25\bpsp$ \texttt{CLIC.p} at $<50\,\mathrm{ms}$ encode / $<15\,\mathrm{ms}$ GPU decode per MP.
+  \item \textbf{Gate \texttt{G3} (\texttt{S\textsuperscript{3}-BB-rANS} Ablation):} Confirm $0.000\bpsp$ seed waste and $\ge 0.04\bpsp$ net gain on \texttt{DIV2K}/\texttt{CLIC.p} (retain only in \texttt{SLGF-Max} if $<0.02\bpsp$).
+  \item \textbf{Gate \texttt{G4} (Multi-Domain Release Audit):} Benchmark across Kodak, DIV2K, CLIC.p/m, Doc24, RAISE-1K 14-bit Bayer RAW, and Chaos/Covid-CT 16-bit DICOM.
+\end{itemize}
+
+\appendix
+\section{Normative Integer Operators and Exact Inversion Equations}
+\label{sec:appendix-ops}
+
+\subsection{Normative \texorpdfstring{$\SL(3)$}{SL(3)}-\texttt{WSIL} Integer Bijection (\texorpdfstring{$C = 3$}{C = 3})}
+With fixed-point rounding $\mathcal{R}_{12}(m, z) \triangleq (m\cdot z + 2^{11}) \gg 12$ on \texttt{INT64} products and header multipliers $U_{ij}, L_{ij}, s_1, s_1^{-1}, s_2, s_2^{-1} \in \Z$, forward lifting maps $x \in \Z^3 \mapsto y \in \Z^3$ via:
+\begin{align}
+  c_2 &= x_{P(2)}, \quad c_1 = x_{P(1)} + \mathcal{R}_{12}(U_{12}, c_2), \quad c_0 = x_{P(0)} + \mathcal{R}_{12}(U_{01} x_{P(1)} + U_{02} c_2, 1), \\
+  u_2 &= c_2 - \mathcal{R}_{12}(s_2, c_1), \;\; u_1 = c_1 + \mathcal{R}_{12}(s_2^{-1}\! - 2^{12}, u_2), \;\; c_2' = u_2 + u_1, \;\; c_1' = u_1 + \mathcal{R}_{12}(s_2 - 2^{12}, c_2'), \\
+  v_2 &= c_1' - \mathcal{R}_{12}(s_1, c_0), \;\; v_1 = c_0 + \mathcal{R}_{12}(s_1^{-1}\! - 2^{12}, v_2), \;\; c_1'' = v_2 + v_1, \;\; c_0'' = v_1 + \mathcal{R}_{12}(s_1 - 2^{12}, c_1''), \\
+  y_0 &= c_0'', \quad y_1 = c_1'' + \mathcal{R}_{12}(L_{10}, c_0''), \quad y_2 = c_2' + \mathcal{R}_{12}(L_{20} c_0'' + L_{21} c_1'', 1).
+\end{align}
+Each line is unitriangular in $\Z^3$ and inverts bit-identically by reversing the order and flipping step signs, even when $s_k$ and $s_k^{-1}$ are independently quantized integers.
+
+\subsection{Normative Binary-Tree \texttt{I-SSM}, \texorpdfstring{\texttt{S\textsuperscript{3}-BB-rANS}}{S3-BB-rANS}, and \texttt{Dyadic-Core66}}
+\textbf{\texttt{I-SSM} (\texttt{Q15.16}/\texttt{Q1.30}):} Partition $(A_t, b_t)_{t=0}^{T-1}$ into $N_B = \lceil T/16\rceil$ chunks ($A_t \le 2^{16}-64$). Within chunk $c$, iterate $\alpha_c^{(k+1)} = (A_t \alpha_c^{(k)} + 2^{15})\gg 16$ and $\beta_c^{(k+1)} = ((A_t \beta_c^{(k)} + 2^{15})\gg 16) + b_t$ from $(2^{30},0)$. Combine chunk summaries via a left-aligned balanced binary tree under $(\alpha_R,\beta_R)\otimes(\alpha_L,\beta_L) \triangleq ((\alpha_R\alpha_L+2^{29})\gg 30, ((\alpha_R\beta_L+2^{29})\gg 30)+\beta_R)$, bounding $|h_t| \le 1024 B_{\max} \ll 2^{62}$.
+
+\noindent\textbf{\texttt{S\textsuperscript{3}-BB-rANS} \& \texttt{Dyadic-Core66}:} Seed $x_{\mathrm{seed}} \subset r_0^{(3)}$ ($1\%$ isolated odd sites) provides $|\mathcal{S}_0| \ge 590\,\mathrm{bits}$ on $128\times 128$ tiles; capping $-\log_2 q_\Psi(z\mid x_{\mathrm{main}}) \le 384\,\mathrm{bits}$ prevents stack underflow with zero synthetic padding bits, encoding $\mathcal{S}_0 = \mathrm{Enc}(\emptyset,x_{\mathrm{seed}};Q) \to (\mathcal{S}_1,z)=\mathrm{Dec}(\mathcal{S}_0;q_\Psi) \to \mathcal{S}_2 = \mathrm{Enc}(\mathcal{S}_1,x_{\mathrm{main}};P(\cdot\mid z)) \to \mathcal{S}_3 = \mathrm{Enc}(\mathcal{S}_2,z;P_Z)$. Each centered residual $\tilde{r} = r - \round{\mu}$ splits at shift $b = \max(0,\lceil \log_2(\sigma/2.5)\rceil)$ into quotient $q = (\tilde{r} + \mathbf{1}_{b>0}2^{b-1}) \gg b$ (coded via $65$ core bins $[-32,32]$ + escape bin $65$ with Exp-Golomb $|q|-33$) and $b$-bit remainder $u = \tilde{r} - (q\ll b) + \mathbf{1}_{b>0}2^{b-1}$ (binary tree for $|q|\le 6$, raw $b$ bits for $|q|>6$).

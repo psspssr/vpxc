@@ -1,0 +1,76 @@
+\documentclass[10pt,letterpaper]{article}
+
+\usepackage[margin=0.85in,top=0.88in,bottom=0.90in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc}
+\usepackage[numbers,sort&compress]{natbib}
+\setlength{\bibsep}{2.5pt}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
+\usepackage[capitalize,noabbrev]{cleveref}
+
+\setlength{\emergencystretch}{1.5em}
+\renewcommand{\arraystretch}{1.14}
+\setlist[itemize]{topsep=3pt,itemsep=2pt,leftmargin=1.5em}
+\setlist[enumerate]{topsep=3pt,itemsep=2pt,leftmargin=1.6em}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\TC}{\operatorname{TC}}
+\newcommand{\KL}{D_{\mathrm{KL}}}
+\newcommand{\SL}{\mathrm{SL}}
+\newcommand{\Aff}{\mathrm{Aff}}
+\newcommand{\bpsp}{\,\mathrm{bpsp}}
+\newcommand{\bpp}{\,\mathrm{bpp}}
+\newcommand{\round}[1]{\lfloor #1 \rceil}
+
+\title{\textbf{Symplectic Lattice-Gauge Flows (\texttt{SLGF}):\\Breaking the Lossless Image Compression Ceiling on $\Z^d$}\\[0.4em]
+\large Mathematical Architecture, Exact Bijectivity Proofs, and Numerical Rate Audits for \texttt{vpxc}}
+
+\author{\texttt{vpxc} Research Specification}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent Classical lossless image codecs plateau near $2.87\bpsp$ ($8.61\bpp$) on Kodak (\texttt{JPEG~XL Modular -e~9}), while neural codecs reach $2.73\bpsp$ zero-shot (\texttt{HPAC}) or $2.52\bpsp$ (\texttt{HPAC-FT}) only at the expense of $\sim 8.45\,\mathrm{s}$ of per-image GPU backpropagation and hardware-fragile IEEE-754 inference. We prove that existing paradigms forfeit $0.35\text{--}0.55\bpsp$ of recoverable redundancy due to six fundamental ceilings: (i)~causal half-plane singularity-crossing surprise despite stationary Szeg\H{o}--Whittle scan invariance, (ii)~unmodeled camera ISP, Bayer CFA, and \texttt{PhotoYCC} 4:2:0 acquisition submanifolds, (iii)~the $+0.500\bpsp$ shot-noise-doubling penalty of hard patch subtraction, (iv)~\emph{Rounding-Induced Total Correlation} (\texttt{RITC}) in deep integer lifting flows, (v)~catastrophic \texttt{rANS} state desynchronization under 1-ULP floating-point drift, and (vi)~$O(HW)$ sequential/SGD bottlenecks. To overcome all six barriers simultaneously, we formulate \textbf{Symplectic Lattice-Gauge Flow (\texttt{SLGF})} for \texttt{vpxc}, uniting closed-form Rissanen MDL acquisition headers, $\SL(C)$ Whitehead--Symplectic integer lifting (\texttt{WSIL}), shallow $L=1$ anti-aliased quincunx cellular-sheaf bridges, precision-weighted $D_8$ Sheaf-Kalman patch fusion, normative \texttt{Q15.16}/\texttt{Q1.30} balanced-tree integer state-space scans (\texttt{I-SSM}), and zero-waste split-lattice bits-back \texttt{Dyadic-Core66 rANS}. With conservative sub-additivity discounts, \texttt{SLGF} projects \textbf{$2.40 \pm 0.04\bpsp$ on Kodak} and \textbf{$2.19 \pm 0.04\bpsp$ on CLIC.p} ($-16.4\%$ to $-17.9\%$ over \texttt{JPEG~XL -e~9}; $-4.8\%$ to $-7.3\%$ over \texttt{HPAC-FT} at $>100\times$ faster encode) with $100\%$ cross-ISA integer determinism and $O(\log N)$ parallel decode.
+\end{abstract}
+
+\tableofcontents
+\vspace{0.5em}
+\hrule
+\vspace{0.8em}
+
+\input{sections/01_intro_baselines}
+\input{sections/02_ceilings}
+\input{sections/03_frameworks}
+\input{sections/04_architecture_alternatives}
+\input{sections/05_roadmap_appendix}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}
