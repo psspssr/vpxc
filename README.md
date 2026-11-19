@@ -162,6 +162,7 @@ VPXC_IMAGE_DIR=/path/to/images PYTHONPATH=src python3 -m unittest discover -s te
 
 ## Specification & Research Papers
 
+- [`docs/slgf-improvement-plan.md`](./docs/slgf-improvement-plan.md) — Engineering roadmap and measured subband telemetry for closing the `3.19 → 2.40 bpsp` gap past `JPEG XL (-e 9)` and `HPAC-FT`.
 - [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) — Typeset mathematical specification, bijectivity & `RITC` proofs, and normative integer equations (`LaTeX` source in [`paper/`](./paper/)).
 - [`docs/frontier-lossless-image-compression.md`](./docs/frontier-lossless-image-compression.md) — Primary `SLGF` architecture monograph and 5-gate experimental roadmap.
 - [`docs/slgf-derivations-and-numerical-checks.md`](./docs/slgf-derivations-and-numerical-checks.md) — Derivations and numerical rate audits (Part I).
