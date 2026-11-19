@@ -128,8 +128,8 @@ Sample per-image rates (`bpsp`) across representative Kodak photographs:
 | Option | Values | Default | Description |
 | :--- | :--- | :---: | :--- |
 | `--tile` | `8 .. 4096` | `768` | Independent tile dimension in pixels (caps peak working RAM) |
-| `--effort` | `1`, `2` | `2` | `1` = fast single-pass selection; `2` = full candidate comparison |
-| `--profile` | `slgf`, `kalman`, `palette`, `qx-rans`, `qx-rice`, `raster`, `raw` | Auto | Force a single tile coding mode for ablation or diagnostics |
+| `--effort` | `1`, `2`, `3` | `2` | `1` = fast selection; `2` = MANIAC / acquisition / D8 search; `3` = SLGF-Max (`S^3-BB-rANS` and the INT8 stem) |
+| `--profile` | `slgf`, `slgf-zero`, `kalman`, `palette`, `qx-rans`, `qx-rice`, `raster`, `raw` | Auto | Force a tile coder. `slgf-zero` is the weight-free profile |
 
 ---
 
@@ -142,7 +142,7 @@ Sample per-image rates (`bpsp`) across representative Kodak photographs:
 3. **Stage 2 — Causal Sub-Cosets, `I-SSM`, & Closed-Form MDL Head (`src/vpxc/slgf_model.py`, `src/vpxc/issm.py`, `src/vpxc/spatial.py`):** Splits each detail scale into 3 causal spatial sub-cosets $r_s^{(1,2,3)}$ conditioned on directional cellular-sheaf conductances, 4-way `Q15.16`/`Q1.30` balanced-tree integer state-space scans (`I-SSM`), `D_8`-equivariant Sheaf-Kalman coarse fusion, cross-channel / mod-4 chroma-phase taps ($\phi_{\mathrm{acq}}$), and closed-form `Q8` Cholesky Ridge weights ($\phi_{\mathrm{head}}$).
 4. **Stage 3 — Normative Student-$t$ `Dyadic-Core66 rANS` (`src/vpxc/entropy.py`):** Evaluates sub-pixel fractional Student-$t$ distributions ($\nu \in \{2.5, 3.5, 6.0, \infty\}$) and bilateral jump bridges via a hardcoded $2\;\mathrm{KB}$ integer PCHIP lookup table into 66-symbol 16-bit `rANS` streams with tilted sub-bucket remainder trees (plus standalone `S^3-BB-rANS` zero-waste bits-back support).
 
-> **Research Specification vs. Current Package:** The full neural-assisted `SLGF` specification in [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) additionally describes a $1.8\;\mathrm{MB}$ quantized `INT8` `I-SSM` backbone trained on large image corpora (targeting $\approx 2.40\;\mathrm{bpsp}$ on Kodak in native SIMD/GPU code). `src/vpxc` implements the complete white-box, zero-neural-weight integer codec without external learned weights.
+> **Research specification vs. current package:** Container version 3 (see [`docs/slgf-improvement-plan.md`](./docs/slgf-improvement-plan.md)) adds the coarse-band Core66 predictor bank, MDL MANIAC trees, the pre-gamma `phi_acq` header, causal multiscale `D_8` Sheaf-Kalman matches, an optional packed INT8 stem (`src/vpxc/weights/slgf_v1.bin`, `--effort 3`), and tile-level `S^3-BB-rANS`. A version-3 file still decodes version-2 payloads, and each tile keeps the version-2 coding when that payload is smaller. The Kodak table above is the measured version-2 suite (`3.1861 bpsp`). The `2.40 ± 0.04 bpsp` flagship figure remains the specification target; this pure-Python build does not claim that rate.
 
 ---
 
@@ -162,6 +162,7 @@ VPXC_IMAGE_DIR=/path/to/images PYTHONPATH=src python3 -m unittest discover -s te
 
 ## Specification & Research Papers
 
+- [`docs/slgf-improvement-plan.md`](./docs/slgf-improvement-plan.md) — Engineering roadmap and measured subband telemetry for closing the `3.19 → 2.40 bpsp` gap past `JPEG XL (-e 9)` and `HPAC-FT`.
 - [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) — Typeset mathematical specification, bijectivity & `RITC` proofs, and normative integer equations (`LaTeX` source in [`paper/`](./paper/)).
 - [`docs/frontier-lossless-image-compression.md`](./docs/frontier-lossless-image-compression.md) — Primary `SLGF` architecture monograph and 5-gate experimental roadmap.
 - [`docs/slgf-derivations-and-numerical-checks.md`](./docs/slgf-derivations-and-numerical-checks.md) — Derivations and numerical rate audits (Part I).

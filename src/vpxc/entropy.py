@@ -827,6 +827,8 @@ def encode_parametric_rans(
     bridge_mask: np.ndarray | None = None,
     bridge_lo: np.ndarray | None = None,
     bridge_hi: np.ndarray | None = None,
+    ext_freq: np.ndarray | None = None,
+    ext_cum: np.ndarray | None = None,
 ) -> bytes:
     """Zero-table-overhead parametric Student-t Dyadic-Core66 rANS encoder.
 
@@ -861,15 +863,28 @@ def encode_parametric_rans(
     t_sub = tilt_tbl[nu]   # (32, 13, 7)
 
     # Vectorized lookup for all standard (non-bridge) symbols:
-    sym_starts = c_sub[si, fi, sym_arr].tolist()
-    sym_freqs = f_sub[si, fi, sym_arr].tolist()
-
-    has_bridge = (
-        bridge_mask is not None
-        and bridge_lo is not None
-        and bridge_hi is not None
-        and bool(np.any(bridge_mask))
-    )
+    if ext_freq is not None or ext_cum is not None:
+        if ext_freq is None or ext_cum is None:
+            raise CodecError("external Core66 rows must include frequencies and cumulatives")
+        ef = np.asarray(ext_freq, dtype=np.int32)
+        ec = np.asarray(ext_cum, dtype=np.int32)
+        if ef.shape != (n, CORE_BINS) or ec.shape != (n, CORE_BINS + 1):
+            raise CodecError("external Core66 rows have the wrong shape")
+        if int(ef.min()) < 1 or not np.all(ef.sum(axis=1) == RANS_M):
+            raise CodecError("external Core66 rows are not a full partition")
+        idx = np.arange(n)
+        sym_starts = ec[idx, sym_arr].tolist()
+        sym_freqs = ef[idx, sym_arr].tolist()
+        has_bridge = False
+    else:
+        sym_starts = c_sub[si, fi, sym_arr].tolist()
+        sym_freqs = f_sub[si, fi, sym_arr].tolist()
+        has_bridge = (
+            bridge_mask is not None
+            and bridge_lo is not None
+            and bridge_hi is not None
+            and bool(np.any(bridge_mask))
+        )
     if has_bridge:
         bm_list = np.asarray(bridge_mask, dtype=np.bool_).ravel().tolist()
         blo_list = np.asarray(bridge_lo, dtype=np.int32).ravel().tolist()
@@ -973,6 +988,8 @@ def decode_parametric_rans(
     bridge_mask: np.ndarray | None = None,
     bridge_lo: np.ndarray | None = None,
     bridge_hi: np.ndarray | None = None,
+    ext_freq: np.ndarray | None = None,
+    ext_cum: np.ndarray | None = None,
 ) -> np.ndarray:
     """Exact pure-integer inverse of :func:`encode_parametric_rans`."""
     if len(data) < 8:
@@ -1009,12 +1026,25 @@ def decode_parametric_rans(
 
     reader = BitReader(data[8 + rans_n : 8 + rans_n + extra_n])
 
-    has_bridge = (
-        bridge_mask is not None
-        and bridge_lo is not None
-        and bridge_hi is not None
-        and bool(np.any(bridge_mask))
-    )
+    if ext_freq is not None or ext_cum is not None:
+        if ext_freq is None or ext_cum is None:
+            raise CodecError("external Core66 rows must include frequencies and cumulatives")
+        ef = np.asarray(ext_freq, dtype=np.int32)
+        ec = np.asarray(ext_cum, dtype=np.int32)
+        if ef.shape != (count, CORE_BINS) or ec.shape != (count, CORE_BINS + 1):
+            raise CodecError("external Core66 rows have the wrong shape")
+        ext_f_lists = ef.tolist()
+        ext_c_lists = ec.tolist()
+        has_bridge = False
+    else:
+        ext_f_lists = None
+        ext_c_lists = None
+        has_bridge = (
+            bridge_mask is not None
+            and bridge_lo is not None
+            and bridge_hi is not None
+            and bool(np.any(bridge_mask))
+        )
     bm_list = (
         np.asarray(bridge_mask, dtype=np.bool_).ravel().tolist() if has_bridge else None
     )
@@ -1033,16 +1063,32 @@ def decode_parametric_rans(
     si_list = si.tolist()
     fi_list = fi.tolist()
     b_list = b_arr.tolist()
+    # 65536-entry alias tables remove bisect from the zero-shift inner loop.
+    lut_cache: dict[tuple, np.ndarray] = {}
 
-    if not has_bridge and not bool(np.any(b_arr > 0)):
+    def _alias(s_v: int, f_v: int, c_row: list[int]) -> np.ndarray:
+        key = (s_v, f_v)
+        cached = lut_cache.get(key)
+        if cached is not None:
+            return cached
+        table = np.empty(RANS_M, dtype=np.uint8)
+        for sym_i in range(len(c_row) - 1):
+            start_i = c_row[sym_i]
+            stop_i = c_row[sym_i + 1]
+            if stop_i > start_i:
+                table[start_i:stop_i] = sym_i
+        lut_cache[key] = table
+        return table
+
+    if not has_bridge and not bool(np.any(b_arr > 0)) and ext_f_lists is None:
         # Fast path: zero shifts and no bridge sites (pure integer inner loop).
         for i in range(count):
             s_v = si_list[i]
             f_v = fi_list[i]
-            f_row = f_lists[s_v][f_v]
             c_row = c_lists[s_v][f_v]
+            f_row = f_lists[s_v][f_v]
             cf = x_state & rans_mask
-            sym = bisect_right(c_row, cf) - 1
+            sym = int(_alias(s_v, f_v, c_row)[cf])
             if sym < 0 or sym >= CORE_BINS:
                 raise CodecError("parametric rANS symbol out of range")
             x_state = f_row[sym] * (x_state >> rans_scale) + cf - c_row[sym]
@@ -1063,8 +1109,12 @@ def decode_parametric_rans(
         s_v = si_list[i]
         f_v = fi_list[i]
         bv = b_list[i]
-        f_row = f_lists[s_v][f_v]
-        c_row = c_lists[s_v][f_v]
+        if ext_f_lists is not None and ext_c_lists is not None:
+            f_row = ext_f_lists[i]
+            c_row = ext_c_lists[i]
+        else:
+            f_row = f_lists[s_v][f_v]
+            c_row = c_lists[s_v][f_v]
 
         if (
             bm_list is not None
@@ -1138,6 +1188,118 @@ def decode_parametric_rans(
             bias = 1 << (bv - 1)
             out[i] = (qv << bv) - bias + uv
     return np.asarray(out, dtype=np.int32)
+
+
+class ParametricDecoder:
+    """Pull-style inverse of :func:`encode_parametric_rans` for causal predictors.
+
+    Context (sigma, fractional mean, optional bridge) may depend on previously
+    reconstructed samples. Symbols are pulled in the same order the batch
+    decoder consumes them, so the bytes match :func:`decode_parametric_rans`.
+    """
+
+    def __init__(self, data: bytes, nu_idx: int) -> None:
+        if len(data) < 8:
+            raise CodecError("truncated parametric rANS header")
+        rans_n = int.from_bytes(data[0:4], "little")
+        extra_n = int.from_bytes(data[4:8], "little")
+        if 8 + rans_n + extra_n > len(data):
+            raise CodecError("truncated parametric rANS payload")
+        shifts_tbl, freqs_tbl, cums_tbl, tilt_tbl = get_parametric_tables()
+        self._shifts = shifts_tbl
+        nu = int(nu_idx)
+        self._nu = nu
+        self._f_sub = freqs_tbl[nu]
+        self._c_sub = cums_tbl[nu]
+        self._t_sub = tilt_tbl[nu]
+        self._f_lists = self._f_sub.tolist()
+        self._c_lists = self._c_sub.tolist()
+        self._t_lists = self._t_sub.tolist()
+        raw = data[8 : 8 + rans_n]
+        if len(raw) < 8:
+            raise CodecError("truncated rANS stream")
+        self._raw = raw
+        self._x = (int.from_bytes(raw[0:4], "little") << 32) | int.from_bytes(raw[4:8], "little")
+        self._pos = 8
+        self._reader = BitReader(data[8 + rans_n : 8 + rans_n + extra_n])
+        self._bi: dict[tuple[int, int, int, int], tuple[list[int], list[int]]] = {}
+
+    def _renorm(self, x: int) -> int:
+        raw = self._raw
+        pos = self._pos
+        while x < RANS64_L:
+            if pos + 4 > len(raw):
+                raise CodecError("truncated rANS stream")
+            x = (x << 32) | int.from_bytes(raw[pos : pos + 4], "little")
+            pos += 4
+        self._pos = pos
+        return x
+
+    def read(
+        self,
+        sig_i: int,
+        frac_i: int,
+        bridge: tuple[int, int] | None = None,
+    ) -> int:
+        s_v = int(sig_i) if 0 <= int(sig_i) < NUM_SIGMAS else 0
+        f_v = int(frac_i) if 0 <= int(frac_i) < NUM_FRACS else 0
+        bv = int(self._shifts[s_v])
+        f_row = self._f_lists[s_v][f_v]
+        c_row = self._c_lists[s_v][f_v]
+        if bridge is not None and bv == 0:
+            lo_v = max(-28, min(28, int(bridge[0])))
+            hi_v = max(-28, min(28, int(bridge[1])))
+            if hi_v - lo_v >= 6:
+                key = (s_v, f_v, lo_v, hi_v)
+                pair = self._bi.get(key)
+                if pair is None:
+                    bi_sig = SIGMA_Q8[max(0, s_v - 3)]
+                    f_bi, _ = build_bimodal_row(self._nu, bi_sig, lo_v, hi_v)
+                    f_mix = _normalize_masses_exact(
+                        self._f_sub[s_v, f_v].astype(np.int64) + f_bi.astype(np.int64)
+                    )
+                    pair = (f_mix.tolist(), cumulative(f_mix).tolist())
+                    self._bi[key] = pair
+                f_row, c_row = pair
+        x = self._x
+        cf = x & (RANS_M - 1)
+        sym = bisect_right(c_row, cf) - 1
+        if sym < 0 or sym >= CORE_BINS:
+            raise CodecError("parametric rANS symbol out of range")
+        x = f_row[sym] * (x >> RANS_SCALE) + cf - c_row[sym]
+        x = self._renorm(x)
+        if sym == CORE_BINS - 1:
+            sign = self._reader.read_bits(1)
+            mag = self._reader.read_exp_golomb() + (QMAX + 1)
+            qv = -mag if sign else mag
+        else:
+            qv = sym - QMAX
+        if bv == 0:
+            self._x = x
+            return int(qv)
+        if -TILT_QMAX <= qv <= TILT_QMAX:
+            depth = bv if bv < TILT_MAX_DEPTH else TILT_MAX_DEPTH
+            rem_low = bv - depth
+            t_row = self._t_lists[s_v][qv + TILT_QMAX]
+            branch = 0
+            for lvl in range(depth):
+                p0 = t_row[((1 << lvl) - 1) + branch]
+                cf_b = x & (RANS_M - 1)
+                if cf_b < p0:
+                    bit = 0
+                    x = p0 * (x >> RANS_SCALE) + cf_b
+                else:
+                    bit = 1
+                    x = (RANS_M - p0) * (x >> RANS_SCALE) + cf_b - p0
+                x = self._renorm(x)
+                branch = (branch << 1) | bit
+            low_bits = self._reader.read_bits(rem_low) if rem_low > 0 else 0
+            uv = (branch << rem_low) | low_bits
+        else:
+            uv = self._reader.read_bits(bv)
+        bias = 1 << (bv - 1)
+        self._x = x
+        return int((qv << bv) - bias + uv)
 
 
 def encode_dyadic_rans(

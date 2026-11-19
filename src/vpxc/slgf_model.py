@@ -211,6 +211,7 @@ def _level_geometry_features(
         "lo_nb": lo_nb,
         "hi_nb": hi_nb,
         "is_bridge": is_bridge,
+        "flat_pred": flat_pred,
         "act_shift": np.array(
             [max(0, (int(kappa2).bit_length() - 8) // 2)], dtype=np.int32
         ),
