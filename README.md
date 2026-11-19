@@ -146,6 +146,17 @@ Sample per-image rates (`bpsp`) across representative Kodak photographs:
 
 ---
 
+## C++ codec
+
+The integer codec also lives in `cpp/`. It encodes the same container as the Python reference and decodes either side's bytes. Build it with:
+
+```bash
+cmake -S cpp -B cpp/build -DCMAKE_CXX_COMPILER=g++
+cmake --build cpp/build
+```
+
+When `cpp/build/libvpxc_native.so` is present, `encode` and `decode` call it. `VPXC_PYTHON=1` keeps the pure-Python path.
+
 ## Running Tests
 
 ```bash
