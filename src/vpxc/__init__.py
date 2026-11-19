@@ -1,13 +1,19 @@
-"""SLGF-Zero lossless image codec.
+"""vpxc — Lossless image compression via Symplectic Lattice-Gauge Flows (SLGF).
 
-Byte-exact implementation of the integer pipeline in
-``docs/frontier-lossless-image-compression.md``: reversible color lifting,
-one predict/update quincunx stage per scale, causal Sheaf-Kalman blending,
-and dyadic quotient entropy coding. Research rate targets in the monograph
-are not claimed as measured results.
+Provides exact, deterministic integer compression and decompression on 8-bit
+and 16-bit grayscale, RGB, and RGBA arrays, plus built-in lossless codec
+benchmarking.
 """
 
+from vpxc.benchmark import CodecResult, benchmark_image, format_benchmark_table
 from vpxc.codec import CodecError, decode, encode
 
-__all__ = ["CodecError", "decode", "encode"]
-__version__ = "0.1.0"
+__all__ = [
+    "CodecError",
+    "CodecResult",
+    "benchmark_image",
+    "decode",
+    "encode",
+    "format_benchmark_table",
+]
+__version__ = "0.2.0"
