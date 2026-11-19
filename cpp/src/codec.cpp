@@ -356,7 +356,14 @@ std::vector<uint8_t> slgf_record(const std::vector<Plane>& planes, int effort, i
   } else {
     // Version 3 at effort 1–2 is smaller than version 2 on every Kodak image,
     // and the version-2 search added another full tile encode.
-    payload = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static);
+    auto flat = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static, 0);
+    auto sheaf = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static, 1);
+    if (!sheaf.empty() && sheaf.size() < flat.size()) {
+      sheaf[0] = static_cast<uint8_t>(sheaf[0] | 0x10);
+      payload = std::move(sheaf);
+    } else {
+      payload = std::move(flat);
+    }
     if (!payload.empty()) payload[0] = static_cast<uint8_t>(payload[0] | 0x80);
   }
   std::vector<uint8_t> out{kProfileSlgf, 0, 0};

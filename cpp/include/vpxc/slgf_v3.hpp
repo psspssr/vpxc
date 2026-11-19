@@ -127,8 +127,10 @@ std::vector<int64_t> context_map(const int64_t* filled, int height, int width);
 std::vector<int64_t> project_head(const int64_t* phi_q4, int rows, int cols);
 #endif
 
+// sheaf_mode: 0 flat lift, 1 sheaf-weighted lift at every quincunx level.
 std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_levels = 4, int effort = 2,
-                                    const std::vector<Halo>* halos = nullptr, bool use_static = true);
+                                    const std::vector<Halo>* halos = nullptr, bool use_static = true,
+                                    int sheaf_mode = 0);
 std::vector<Plane> decode_slgf_v3(const uint8_t* data, size_t size, int height, int width, int channels,
                                   const std::vector<Halo>* halos = nullptr);
 
