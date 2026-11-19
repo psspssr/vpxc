@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.vpxc
 .venv/
+*.so
 
 # LaTeX build and auxiliary artifacts
 *.aux

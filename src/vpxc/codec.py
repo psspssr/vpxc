@@ -53,11 +53,13 @@ from vpxc.lattice import (
     unpack_even,
 )
 from vpxc.slgf_model import decode_slgf_tile, encode_slgf_tile
+from vpxc.slgf_v3 import decode_slgf_v3, encode_slgf_v3
 from vpxc.spatial import decode_raster, encode_raster
 from vpxc.wsil import SL3Params
 
 MAGIC = b"VPXC"
-VERSION = 2
+VERSION = 3
+VERSIONS = (2, 3)
 TILE = 768
 MAX_LEVELS = 4
 MAX_PALETTE_COLORS = 512
@@ -70,7 +72,7 @@ PROFILE_QX_RANS = 4
 PROFILE_PALETTE = 5
 PROFILE_SLGF = 6
 
-PROFILES = ("raw", "raster", "kalman", "qx-rice", "qx-rans", "palette", "slgf")
+PROFILES = ("raw", "raster", "kalman", "qx-rice", "qx-rans", "palette", "slgf", "slgf-zero")
 
 FLAG_SHEAF = 1
 COLOR_FLAG_EXTRA = 1
@@ -86,19 +88,25 @@ def encode(
     tile: int = TILE,
     effort: int = 2,
     profile: str | None = None,
+    version: int = VERSION,
 ) -> bytes:
     """Compress ``image`` (``uint8`` or ``uint16``, ``HxW`` or ``HxWx{1,3,4}``).
 
-    ``profile`` forces one tile coder (``slgf``, ``kalman``, ``palette``,
-    ``qx-rans``, ``qx-rice``, ``raster``, or ``raw``). By default ``encode``
-    evaluates the candidates enabled by ``effort`` (``1`` or ``2``) and writes
-    the shortest exact tile representation.
+    ``profile`` forces one tile coder (``slgf``, ``slgf-zero``, ``kalman``,
+    ``palette``, ``qx-rans``, ``qx-rice``, ``raster``, or ``raw``). By default
+    ``encode`` evaluates the candidates enabled by ``effort`` (``1``, ``2``, or
+    ``3``) and writes the shortest exact tile representation. ``version=2``
+    writes the previous container.
     """
     src, dtype = _normalize(image)
     if tile < 8 or tile > 4096:
         raise CodecError("tile size must be between 8 and 4096")
-    if effort not in (1, 2):
-        raise CodecError("effort must be 1 or 2")
+    if version not in VERSIONS:
+        raise CodecError("unsupported bitstream version")
+    if version == 2 and effort not in (1, 2):
+        raise CodecError("version 2 effort must be 1 or 2")
+    if version == 3 and effort not in (1, 2, 3):
+        raise CodecError("effort must be 1, 2, or 3")
     height, width, channels = _dims(src)
     color_tr = _select_color(src)
     crc = zlib.crc32(_sample_bytes(src)) & 0xFFFFFFFF
@@ -108,7 +116,7 @@ def encode(
     header = bytearray(
         _HEADER.pack(
             MAGIC,
-            VERSION,
+            version,
             1 if dtype == np.uint8 else 2,
             channels,
             color_tr.mode,
@@ -150,10 +158,23 @@ def encode(
             int(color_tr.extra_weights[2]),
         )
 
+    lifted = None
+    if version == 3:
+        lifted = apply_color_forward(_split(src), color_tr)
     parts: list[bytes] = [bytes(header)]
     for y0, y1, x0, x1 in _tiles(height, width, tile):
         block = src[y0:y1, x0:x1]
-        parts.append(_encode_tile(block, color_tr, effort, profile))
+        halos = None if lifted is None else _halos(lifted, y0, x0, y1, x1)
+        parts.append(
+            _encode_tile(
+                block,
+                color_tr,
+                effort,
+                profile,
+                version=version,
+                halos=halos,
+            )
+        )
     return b"".join(parts)
 
 
@@ -174,8 +195,8 @@ def decode(data: bytes) -> np.ndarray:
         crc,
         tile,
     ) = _HEADER.unpack_from(data, 0)
-    if magic != MAGIC or version != VERSION:
-        raise CodecError("not a vpxc version-2 bitstream")
+    if magic != MAGIC or version not in VERSIONS:
+        raise CodecError("not a readable vpxc bitstream")
     if bps not in (1, 2) or channels not in (1, 3, 4):
         raise CodecError("unsupported sample format")
     if width <= 0 or height <= 0 or tile < 8 or width > 20000 or height > 20000:
@@ -236,7 +257,16 @@ def decode(data: bytes) -> np.ndarray:
 
     for y0, y1, x0, x1 in _tiles(height, width, tile):
         block, pos = _decode_tile(
-            data, pos, y1 - y0, x1 - x0, channels, dtype, color_tr
+            data,
+            pos,
+            y1 - y0,
+            x1 - x0,
+            channels,
+            dtype,
+            color_tr,
+            version=version,
+            dest=out,
+            origin=(y0, x0),
         )
         if channels == 1:
             out[y0:y1, x0:x1] = block
@@ -307,20 +337,73 @@ def _split(tile: np.ndarray) -> list[np.ndarray]:
     return [tile[:, :, i].astype(np.int32, copy=False) for i in range(tile.shape[2])]
 
 
+def _halos(
+    lifted: list[np.ndarray], y0: int, x0: int, y1: int, x1: int, radius: int = 16
+) -> list[tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]]:
+    pt = min(radius, y0)
+    pl = min(radius, x0)
+    pt -= pt & 1
+    pl -= pl & 1
+    halos = []
+    for plane in lifted:
+        top = plane[y0 - pt : y0, x0:x1] if pt else None
+        left = plane[y0:y1, x0 - pl : x0] if pl else None
+        corner = plane[y0 - pt : y0, x0 - pl : x0] if pt and pl else None
+        halos.append((top, left, corner))
+    return halos
+
+
+def _halos_from_decoded(
+    dest: np.ndarray,
+    y0: int,
+    x0: int,
+    y1: int,
+    x1: int,
+    color_tr: ColorTransform,
+) -> list[tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]]:
+    pt = min(16, y0)
+    pl = min(16, x0)
+    pt -= pt & 1
+    pl -= pl & 1
+
+    def lift(y_a: int, y_b: int, x_a: int, x_b: int) -> list[np.ndarray]:
+        return apply_color_forward(_split(dest[y_a:y_b, x_a:x_b]), color_tr)
+
+    tops = lift(y0 - pt, y0, x0, x1) if pt else None
+    lefts = lift(y0, y1, x0 - pl, x0) if pl else None
+    corners = lift(y0 - pt, y0, x0 - pl, x0) if pt and pl else None
+    if tops is None and lefts is None and corners is None:
+        channels = 1 if dest.ndim == 2 else int(dest.shape[2])
+        return [(None, None, None) for _ in range(channels)]
+    count = len(tops or lefts or corners or [])
+    halos = []
+    for index in range(count):
+        halos.append(
+            (
+                None if tops is None else tops[index],
+                None if lefts is None else lefts[index],
+                None if corners is None else corners[index],
+            )
+        )
+    return halos
+
+
 def _encode_tile(
     tile: np.ndarray,
     color_tr: ColorTransform,
     effort: int,
     profile: str | None,
+    version: int = VERSION,
+    halos: list | None = None,
 ) -> bytes:
     planes = apply_color_forward(_split(tile), color_tr)
     if profile is not None:
-        forced = _forced_record(tile, planes, profile)
+        forced = _forced_record(tile, planes, profile, effort, version, halos)
         if forced is None:
             raise CodecError(f"profile {profile} does not apply to this tile")
         return forced
 
-    candidates = [_raw_record(tile), _slgf_record(planes)]
+    candidates = [_raw_record(tile), _slgf_record(planes, effort, version, halos, True)]
     palette = _palette_record(tile, effort=effort)
     if palette is not None:
         candidates.append(palette)
@@ -330,7 +413,12 @@ def _encode_tile(
 
 
 def _forced_record(
-    tile: np.ndarray, planes: list[np.ndarray], profile: str
+    tile: np.ndarray,
+    planes: list[np.ndarray],
+    profile: str,
+    effort: int = 2,
+    version: int = VERSION,
+    halos: list | None = None,
 ) -> bytes | None:
     if profile == "raw":
         return _raw_record(tile)
@@ -341,7 +429,9 @@ def _forced_record(
     if profile == "palette":
         return _palette_record(tile, effort=2)
     if profile == "slgf":
-        return _slgf_record(planes)
+        return _slgf_record(planes, effort, version, halos, True)
+    if profile == "slgf-zero":
+        return _slgf_record(planes, min(effort, 2), version, halos, False)
     if profile in ("qx-rice", "qx-rans"):
         records = _quincunx_candidates(
             planes, effort=2, entropies=("rans" if profile == "qx-rans" else "rice",)
@@ -356,8 +446,30 @@ def _raw_record(tile: np.ndarray) -> bytes:
     return bytes([PROFILE_RAW]) + _sample_bytes(tile)
 
 
-def _slgf_record(planes: list[np.ndarray]) -> bytes:
-    payload = encode_slgf_tile(planes, max_levels=MAX_LEVELS)
+def _slgf_record(
+    planes: list[np.ndarray],
+    effort: int = 2,
+    version: int = VERSION,
+    halos: list | None = None,
+    use_static: bool = True,
+) -> bytes:
+    if version <= 2:
+        payload = encode_slgf_tile(planes, max_levels=MAX_LEVELS)
+    else:
+        legacy = encode_slgf_tile(planes, max_levels=MAX_LEVELS)
+        modern = encode_slgf_v3(
+            planes,
+            max_levels=MAX_LEVELS,
+            effort=effort,
+            halos=halos,
+            use_static=use_static,
+        )
+        # Bit 7 of the depth byte selects the v3 payload. The legacy layout
+        # stays available so a tile never grows just to carry an unused tool.
+        if len(modern) < len(legacy) and modern:
+            payload = bytes([modern[0] | 0x80]) + modern[1:]
+        else:
+            payload = legacy
     return bytes([PROFILE_SLGF, 0, 0]) + _len_prefix(payload)
 
 
@@ -552,6 +664,9 @@ def _decode_tile(
     channels: int,
     dtype: np.dtype,
     color_tr: ColorTransform,
+    version: int = VERSION,
+    dest: np.ndarray | None = None,
+    origin: tuple[int, int] = (0, 0),
 ) -> tuple[np.ndarray, int]:
     if pos >= len(data):
         raise CodecError("truncated tile")
@@ -585,7 +700,15 @@ def _decode_tile(
     pos += length
 
     if prof == PROFILE_SLGF:
-        planes = decode_slgf_tile(payload, height, width, channels)
+        if version >= 3 and payload and (payload[0] & 0x80):
+            y0, x0 = origin
+            halos = None
+            if dest is not None:
+                halos = _halos_from_decoded(dest, y0, x0, y0 + height, x0 + width, color_tr)
+            modern = bytes([payload[0] & 0x7F]) + payload[1:]
+            planes = decode_slgf_v3(modern, height, width, channels, halos)
+        else:
+            planes = decode_slgf_tile(payload, height, width, channels)
         restored = apply_color_inverse(planes, color_tr)
         return _cast(restored, dtype, channels), pos
     if prof in (PROFILE_RASTER, PROFILE_KALMAN):
