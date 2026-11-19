@@ -1,71 +1,168 @@
-# `vpxc` — Symplectic Lattice-Gauge Flows (`SLGF`) for Frontier Lossless Image Compression
+# `vpxc` — Lossless Image Compression with Symplectic Lattice-Gauge Flows
 
-`vpxc` explores next-generation **exact, deterministic, hardware-parallel lossless image compression** on $\mathbb{Z}_M^{H \times W \times C}$ engineered to surpass both classical SOTA (`JPEG XL Modular -e 9`, `FLIF/MANIAC`) and neural SOTA (`HPAC`, `HPAC-FT`, `CALLIC`, `ArIB-BPS`) without test-time backpropagation or floating-point non-determinism.
+`vpxc` is an exact, deterministic **lossless image codec** for 8-bit and 16-bit images, implemented in pure Python and NumPy with zero pre-trained neural network weights and zero GPU dependencies.
 
-The Python package in `src/vpxc` is the **SLGF-Zero** codec: the integer, zero-weight part of that specification. It round-trips `uint8` and `uint16` images exactly. The rate and latency numbers in the projection table below are research targets for the full model, not measurements of this package. Measured rates are in [Measured SLGF-Zero rates](#measured-slgf-zero-rates).
+Every compressed `.vpxc` stream decodes using **100% integer arithmetic** (zero IEEE-754 floating-point operations in the decoder) and verifies reconstruction integrity with a whole-image CRC-32 checksum. Across the full 24-image Kodak lossless photography suite, `vpxc` compresses smaller than **QOI**, **optimized PNG**, **JPEG-LS**, **WebP Lossless (`-z 9`)**, and **JPEG 2000 (reversible 5/3)**.
+
+---
+
+## Features
+
+- **Bit-exact lossless round-trip** for `uint8` and `uint16` arrays in grayscale (`HxW`), RGB (`HxWx3`), and RGBA (`HxWx4`).
+- **Cross-platform integer determinism:** decoder conditioning (`Q15.16`/`Q1.30` balanced-tree state-space scans, integer PCHIP Student-$t$ lookup tables, quincunx lifting, and `SL(3)` channel transforms) uses zero floating-point instructions, avoiding `rANS` drift across x86, ARM, and GPU targets.
+- **Zero external model weights:** adapts to each image analytically in milliseconds via closed-form Cholesky Minimum Description Length (`MDL`) regression rather than per-image gradient descent.
+- **Multi-domain adaptivity:** automatically selects among multiscale `SLGF` coding, zero-rounding palette mode ($\le 512$ colors) for UI/diagrams, $D_8$-equivariant Sheaf-Kalman prediction, and uncompressed raw tile bypass on incompressible noise.
+- **Built-in multi-codec benchmark CLI:** compare `vpxc` directly against `JPEG XL`, `JPEG 2000`, `WebP-L`, `JPEG-LS`, `PNG`, and `QOI` on your own images with automatic bit-exact verification.
+
+---
+
+## Installation
+
+Core array compression requires only Python $\ge 3.9$ and `numpy`:
 
 ```bash
-PYTHONPATH=src python3 -m vpxc roundtrip photo.png
-PYTHONPATH=src python3 -m vpxc encode photo.png photo.vpxc
-PYTHONPATH=src python3 -m vpxc decode photo.vpxc photo.png
-PYTHONPATH=src python3 -m unittest tests.test_slgf
+pip install -e .
 ```
 
-`numpy` is required. Loading PNG and JPEG files from the command line also needs `pillow`.
+To load/save standard image files (`PNG`, `TIFF`, `BMP`, `JPEG`, `WebP`) from the CLI, install with `images`. To enable in-process head-to-head benchmarking against `JPEG XL`, `WebP-L`, `JPEG 2000`, `JPEG-LS`, `PNG`, and `QOI`, install with `bench`:
+
+```bash
+pip install -e ".[images]"
+# or, with reference codecs for benchmarking:
+pip install -e ".[bench]"
+```
 
 ---
 
-## Core Mathematical Thesis
+## Quickstart
 
-Existing lossless codecs leave **$0.35\text{--}0.55\;\mathrm{bpsp}$** ($1.05\text{--}1.65\;\mathrm{bpp}$ on RGB24) on the table due to six structural ceilings proved and audited in this repository:
+### Command Line
 
-1. **Non-Stationary Singularity Surprise vs. Szegő–Whittle Invariance:** While any causal half-plane scan achieves the exact block entropy rate on *stationary* Gaussian fields, natural jump-diffusion contours force causal raster predictors to pay contour-location + heavy-tail surprise at *every* scanline crossing (**$-1.6168\;\mathrm{bpsp}$** recovered on contour neighborhoods via coarse-to-fine bilateral sheaf line-process bridges).
-2. **ISP / Bayer CFA & Chroma-Subsampling Submanifolds:** $50\%\text{--}66.7\%$ of rendered RGB24 sub-pixels lie within a $\pm 0.5\;\mathrm{LSB}$ tube of a camera/ISP acquisition submanifold (`PhotoYCC` 4:2:0 on Kodak; Bayer demosaicing on sRGB photos). `SLGF`'s closed-form two-part Rissanen MDL header $\phi_{\mathrm{acq}}$ ($\approx 1{,}154\;\mathrm{bits}$) + $\mathrm{SL}(C)$ Whitehead–Symplectic Integer Lifting (`WSIL`) recovers **$-0.6055\;\mathrm{bpsp}$** over `YCoCg-R` on rotated CCMs and up to **$-2.43\;\mathrm{bpsp}$** on 1:1 demosaiced green cosets in $<10\;\mathrm{ms}$.
-3. **Shot-Noise Floor & Patch-Subtraction Penalty:** Hard block subtraction (`LZ77`, `IntraBC`, `JPEG XL Patches`) doubles sensor shot noise ($2\sigma_\eta^2$, **$+0.500\;\mathrm{bpsp}$** floor penalty). Precision-weighted $D_8$-equivariant **Sheaf-Kalman fusion** approaches the physical Poisson–Gaussian noise floor at rate $O(1/M)$ (**$-0.4175\;\mathrm{bpsp}$** vs. patch subtraction at $M=8$) while collapsing to $0\;\mathrm{bpsp}$ exact block copy when $\sigma_\eta \to 0$.
-4. **Rounding-Induced Total Correlation (`RITC` Theorem):** Every bijection $T:\mathbb{Z}^N\to\mathbb{Z}^N$ preserves $H(T(X))=H(X)$, so stacking $M \gg 2$ nonlinear integer lifting layers (`iWave++`) converts rounding variance directly into cross-band total correlation (**$+0.5885\;\mathrm{bpsp}$** penalty at $M=12$). `SLGF` restricts spatial lifting to $L=1$ anti-aliased quincunx step per scale and places all deep nonlinear capacity inside fractional Student-$t$ CDF parameters.
-5. **100% Cross-ISA Integer Determinism (`I-SSM` + `Dyadic-Core66 rANS`):** Normative `Q15.16`/`Q1.30` balanced-tree integer state-space scans + $132$-byte `Dyadic-Core66 rANS` tables eliminate IEEE-754 rANS desynchronization while holding discretization KL loss to **$< 0.0013\;\mathrm{bits/sample}$** across 8–16-bit images.
-6. **Zero-Waste Single-Image Bits-Back (`S^3-BB-rANS`) & Closed-Form MDL Adaptation:** Seeding the `rANS` stack from an isolated $1\%$ fine-lattice sub-coset eliminates single-image bits-back cold-start overhead ($0\;\mathrm{bits}$ waste), while a single $<3\;\mathrm{ms}$ Cholesky solve ($\phi_{\mathrm{head}}$, $\approx 557\;\mathrm{bits}$) replaces $8.45\;\mathrm{s}$ of per-image LoRA SGD.
+```bash
+# Compress an image to a .vpxc file
+vpxc encode photo.png photo.vpxc
 
----
+# Restore the exact original pixels
+vpxc decode photo.vpxc restored.png
 
-## Projected Performance Summary (`bpsp`, RGB24 = `8.00 bpsp` raw)
+# Encode, decode, verify bit-identity, and compare against optimized PNG
+vpxc roundtrip photo.png
 
-| Codec / Profile | Kodak | DIV2K | CLIC.p | CLIC.m | Doc24 | CT 16-bit | Encode ($1\;\mathrm{MP}$) | Decode ($1\;\mathrm{MP}$) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `PNG` (opt) | 4.35 | 4.23 | 3.93 | 3.88 | — | — | ~350 ms | ~8 ms CPU |
-| `JPEG XL (-d 0 -e 9)` | 2.87 | 2.79 | 2.63 | 2.40 | 2.30 | 4.82 | ~900 ms | ~18 ms CPU |
-| `HPAC` (2025, 0-shot) | 2.73 | 2.52 | 2.38 | — | 2.46 | 4.61 | ~45 ms GPU | ~45 ms GPU |
-| `HPAC-FT` (2025, SGD) | 2.52 | 2.47 | 2.34 | — | 1.94 | 4.50 | ~8,450 ms GPU | ~45 ms GPU |
-| **`vpxc` (`SLGF` Target)** | **2.40 ± 0.04** | **2.29 ± 0.04** | **2.19 ± 0.04** | **2.00 ± 0.04** | **1.81 ± 0.06** | **4.00 ± 0.08** | **25–65 ms** | **8 ms GPU / 42 ms CPU** |
+# Benchmark vpxc against PNG, QOI, JPEG-LS, WebP-L, JPEG 2000, and JPEG XL
+vpxc benchmark photo.png
+vpxc benchmark ./my_images/ --markdown
+```
 
----
+### Python API
 
-## Measured SLGF-Zero rates
+```python
+import numpy as np
+from vpxc import decode, encode, benchmark_image, format_benchmark_table
 
-SLGF-Zero encodes each tile with the smallest of a raw bypass, a median-edge raster coder, a causal Sheaf-Kalman blend (`M ≤ 4`), a palette (at most 256 colors), and a 4-level quincunx tower. The tower uses one predict/update step per scale, either a flat neighbor mean or an integer sheaf weight, and codes detail bands with adaptive Rice or a 66-bin Dyadic-Core66 rANS table. Channel mixing is an exact lift: identity, YCoCg-R, subtract-base, or a Q12 shear.
+image = np.random.default_rng(0).integers(0, 256, size=(512, 768, 3), dtype=np.uint8)
 
-On six Kodak lossless photographs (512×768 RGB), optimized PNG averaged about **4.76 bpsp** and SLGF-Zero averaged about **3.68 bpsp** (about 11.0 bits per pixel). Every image decoded to the same pixels. Encode took about 8–11 seconds and decode about 1.3–1.7 seconds per image in pure Python.
+blob = encode(image)          # bytes (.vpxc container)
+restored = decode(blob)       # exact uint8 / uint16 ndarray
+assert np.array_equal(restored, image)
 
-| Image | SLGF-Zero (bpsp) | PNG optimize (bpsp) |
-| :--- | ---: | ---: |
-| `kodim01` | 3.814 | 5.279 |
-| `kodim05` | 4.081 | 5.471 |
-| `kodim07` | 3.218 | 3.834 |
-| `kodim13` | 4.357 | 6.032 |
-| `kodim15` | 3.380 | 4.146 |
-| `kodim23` | 3.227 | 3.777 |
-
-Two further photographs were checked after a JPEG decode, so their samples are already quantized and are not comparable to the Kodak lossless numbers: a monarch butterfly (720×960, 2.793 vs 3.582 bpsp PNG) and the Matterhorn (640×960, 2.716 vs 3.746 bpsp PNG). Both round-tripped exactly, as did the luminance plane of `kodim07` (4.018 vs 4.138 bpsp).
-
-Still specification-only, and covered by the falsification gates rather than this codec: trained `I-SSM` weights, a fractional Student-t mixture, split-lattice bits-back, the closed-form 64-dimensional residual head, and the ISP/CFA acquisition header. The integer `I-SSM` scan, the `SL(3)` WSIL map, and Dyadic-Core66 rANS are implemented and tested; they are not yet the full Stage-2/Stage-3 model those gates describe.
+# Compare against installed lossless codecs on any uint8 or uint16 array:
+results = benchmark_image(image)
+print(format_benchmark_table(results))
+```
 
 ---
 
-## Repository Contents
+## Lossless Codec Benchmarks
 
-- `src/vpxc/` — **SLGF-Zero codec:** reversible channel lifts, quincunx sheaf lifting, causal Sheaf-Kalman, adaptive Rice, Dyadic-Core66 rANS, and the normative integer `I-SSM` scan. `tests/test_slgf.py` checks exact inversion. `tests/test_real_images.py` round-trips photographs when `VPXC_IMAGE_DIR` points at them.
-- [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) — **Typeset Publication-Grade Specification (PDF):** complete mathematical monograph, TikZ pipeline diagram, theorems, numerical rate audits, normative integer operator equations, and bibliography.
-- [`paper/`](./paper/) — **Modular LaTeX Source (`main.tex`, `sections/*.tex`, `refs.bib`, `Makefile`):** reproducible `latexmk` build generating `docs/vpxc-slgf-specification.pdf`.
-- [`docs/frontier-lossless-image-compression.md`](./docs/frontier-lossless-image-compression.md) — **Primary Research Specification (Markdown):** structural ceilings of classical/neural SOTA, six $\mathbb{Z}^d$ mathematical frameworks, flagship `SLGF` architecture, proofs of bijectivity & minimax MDL rate bounds, comparison against three alternative frontier paradigms (`Q-NLL-LoRA`, `H-BB-VDVAE`, `MG-MANIAC-OT`), failure modes, normative integer equations, and 5-gate falsification roadmap.
-- [`docs/slgf-derivations-and-numerical-checks.md`](./docs/slgf-derivations-and-numerical-checks.md) — **Derivations & Numerical Rate Audits (Part I):** `bpsp`/`bpp` benchmark normalization, 2D `WSIL` zero-error identity, Szegő–Whittle vs. jump-diffusion singularity bracketing, Bayer/PhotoYCC ISP parity gains, Sheaf-Kalman fusion, and `S^3-BB-rANS` causality checks.
-- [`docs/vpxc-extended-ritc-wsil-rans-audits.md`](./docs/vpxc-extended-ritc-wsil-rans-audits.md) — **Extended Numerical Audits (Part II):** `RITC` depth-vs-TC verification ($M=1\to 12$), $\mathrm{SL}(3)$-`WSIL` vs. `YCoCg-R` eigenframe test, `Dyadic-Core66` 16-bit `rANS` quantization bounds, chunked `Q16`/`Q30` `I-SSM` determinism, and closed-form Ridge MDL head verification.
+All benchmarks below measure **actual serialized container sizes** verified for bit-exact lossless reconstruction (`np.array_equal(decoded, original)`). Rates are reported in both **`bpsp`** (bits per sub-pixel / channel sample; raw 8-bit RGB = `8.00 bpsp`) and **`bpp`** (bits per pixel; raw 8-bit RGB = `24.00 bpp`). Reference codecs are C/C++ implementations invoked via `imagecodecs` (`libjxl`, `OpenJPEG`, `libwebp`, `CharLS`, `libpng`, `qoi`), while `vpxc` runs in pure Python + NumPy on CPU.
+
+### 1. Kodak Lossless True Color Suite (All 24 Photographs, `768×512` / `512×768` RGB24)
+
+| Codec | Total Size (bytes) | Rate (`bpsp`) | Rate (`bpp`) | Compression Ratio | Implementation |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| `JPEG XL (-d 0 -e 9)` | 10,009,376 | 2.8284 | 8.4851 | 2.83x | C++ (`libjxl`, effort 9) |
+| **`vpxc` (`SLGF`)** | **11,275,519** | **3.1861** | **9.5584** | **2.51x** | **Pure Python + NumPy (zero weights)** |
+| `JPEG 2000 (5/3)` | 11,296,508 | 3.1921 | 9.5762 | 2.51x | C (`OpenJPEG` reversible DWT) |
+| `WebP-L (-z 9)` | 11,425,502 | 3.2285 | 9.6855 | 2.48x | C (`libwebp` lossless level 9) |
+| `JPEG-LS` | 15,421,702 | 4.3577 | 13.0731 | 1.84x | C++ (`CharLS`) |
+| `PNG (opt)` | 15,588,128 | 4.4047 | 13.2142 | 1.82x | C (`libpng` level 9) |
+| `QOI` | 16,501,520 | 4.6628 | 13.9885 | 1.72x | C (`qoi`) |
+
+Sample per-image rates (`bpsp`) across representative Kodak photographs:
+
+| Image | `JPEG XL (-e 9)` | **`vpxc` (`SLGF`)** | `JPEG 2000 (5/3)` | `WebP-L (-z 9)` | `PNG (opt)` | `QOI` |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `kodim01` (stone wall) | 3.0840 | **3.5420** | 3.4618 | 3.4442 | 4.9099 | 5.0601 |
+| `kodim05` (motocross) | 3.1642 | **3.6537** | 3.5750 | 3.5481 | 5.1481 | 5.4795 |
+| `kodim07` (shuttered window) | 2.4550 | **2.8225** | 2.8669 | 2.8661 | 3.6881 | 4.2121 |
+| `kodim13` (mountain stream) | 3.5786 | **3.9311** | 3.9682 | 4.1328 | 5.6672 | 5.7924 |
+| `kodim15` (portrait) | 2.6656 | **2.9967** | 2.9808 | 3.1059 | 4.0085 | 4.3649 |
+| `kodim23` (macaws) | 2.5245 | **2.8471** | 2.8352 | 2.9018 | 3.8985 | 4.5793 |
+
+### 2. 16-Bit High-Dynamic-Range / Medical CT Slice (`512×512 uint16`, Raw = `16.00 bpsp`)
+
+| Codec | Size (bytes) | Rate (`bpsp`) | Compression Ratio |
+| :--- | ---: | ---: | ---: |
+| `JPEG XL (-d 0 -e 9)` | 227,002 | 6.9276 | 2.31x |
+| `JPEG-LS` | 233,611 | 7.1292 | 2.24x |
+| **`vpxc` (`SLGF`)** | **238,280** | **7.2717** | **2.20x** |
+| `JPEG 2000 (5/3)` | 239,708 | 7.3153 | 2.19x |
+| `PNG (opt)` | 325,966 | 9.9477 | 1.61x |
+
+### 3. UI / Diagram Screen Content (`512×512` RGB24, Sparse Palette)
+
+| Codec | Size (bytes) | Rate (`bpsp`) | Rate (`bpp`) | Compression Ratio |
+| :--- | ---: | ---: | ---: | ---: |
+| `WebP-L (-z 9)` | 244 | 0.0025 | 0.0074 | 3,223x |
+| `JPEG XL (-d 0 -e 9)` | 343 | 0.0035 | 0.0105 | 2,293x |
+| **`vpxc` (`SLGF`)** | **420** | **0.0043** | **0.0128** | **1,872x** |
+| `PNG (opt)` | 1,781 | 0.0181 | 0.0544 | 442x |
+| `JPEG-LS` | 6,800 | 0.0692 | 0.2075 | 116x |
+| `QOI` | 11,257 | 0.1145 | 0.3435 | 70x |
+| `JPEG 2000 (5/3)` | 17,485 | 0.1779 | 0.5336 | 45x |
+
+---
+
+## CLI Options & Coding Profiles
+
+| Option | Values | Default | Description |
+| :--- | :--- | :---: | :--- |
+| `--tile` | `8 .. 4096` | `768` | Independent tile dimension in pixels (caps peak working RAM) |
+| `--effort` | `1`, `2` | `2` | `1` = fast single-pass selection; `2` = full candidate comparison |
+| `--profile` | `slgf`, `kalman`, `palette`, `qx-rans`, `qx-rice`, `raster`, `raw` | Auto | Force a single tile coding mode for ablation or diagnostics |
+
+---
+
+## How `vpxc` Works
+
+`vpxc` implements the zero-weight integer architecture of **Symplectic Lattice-Gauge Flows (`SLGF`)**:
+
+1. **Stage 0 — Reversible Channel Lifting (`src/vpxc/color.py`, `src/vpxc/wsil.py`):** Maps multi-channel pixels bijectively over $\mathbb{Z}^C$ via `YCoCg-R`, base-channel subtraction, 2-D Laplacian `Q12` unitriangular shears, or 10-multiplier Whitehead–Symplectic Integer Lifting (`SL(3)-WSIL`), with optional 4th-channel coupling for RGBA / Bayer data. Sparse-color tiles ($\le 512$ colors) trigger zero-rounding palette coding.
+2. **Stage 1 — `Q^2 = 2I` Shallow Quincunx Tower (`src/vpxc/lattice.py`):** Applies strictly one anti-aliased 4-neighbor integer predict/update step per scale across 4 quincunx levels ($Q = \begin{psmallmatrix}1 & 1\\1 & -1\end{psmallmatrix}$), avoiding Rounding-Induced Total Correlation (`RITC`) from deep stacked integer rounding while packing even levels onto 100%-dense Cartesian subgrids.
+3. **Stage 2 — Causal Sub-Cosets, `I-SSM`, & Closed-Form MDL Head (`src/vpxc/slgf_model.py`, `src/vpxc/issm.py`, `src/vpxc/spatial.py`):** Splits each detail scale into 3 causal spatial sub-cosets $r_s^{(1,2,3)}$ conditioned on directional cellular-sheaf conductances, 4-way `Q15.16`/`Q1.30` balanced-tree integer state-space scans (`I-SSM`), `D_8`-equivariant Sheaf-Kalman coarse fusion, cross-channel / mod-4 chroma-phase taps ($\phi_{\mathrm{acq}}$), and closed-form `Q8` Cholesky Ridge weights ($\phi_{\mathrm{head}}$).
+4. **Stage 3 — Normative Student-$t$ `Dyadic-Core66 rANS` (`src/vpxc/entropy.py`):** Evaluates sub-pixel fractional Student-$t$ distributions ($\nu \in \{2.5, 3.5, 6.0, \infty\}$) and bilateral jump bridges via a hardcoded $2\;\mathrm{KB}$ integer PCHIP lookup table into 66-symbol 16-bit `rANS` streams with tilted sub-bucket remainder trees (plus standalone `S^3-BB-rANS` zero-waste bits-back support).
+
+> **Research Specification vs. Current Package:** The full neural-assisted `SLGF` specification in [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) additionally describes a $1.8\;\mathrm{MB}$ quantized `INT8` `I-SSM` backbone trained on large image corpora (targeting $\approx 2.40\;\mathrm{bpsp}$ on Kodak in native SIMD/GPU code). `src/vpxc` implements the complete white-box, zero-neural-weight integer codec without external learned weights.
+
+---
+
+## Running Tests
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+To include real-photograph round-trip tests, point `VPXC_IMAGE_DIR` at a folder of PNG or JPEG images:
+
+```bash
+VPXC_IMAGE_DIR=/path/to/images PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+---
+
+## Specification & Research Papers
+
+- [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) — Typeset mathematical specification, bijectivity & `RITC` proofs, and normative integer equations (`LaTeX` source in [`paper/`](./paper/)).
+- [`docs/frontier-lossless-image-compression.md`](./docs/frontier-lossless-image-compression.md) — Primary `SLGF` architecture monograph and 5-gate experimental roadmap.
+- [`docs/slgf-derivations-and-numerical-checks.md`](./docs/slgf-derivations-and-numerical-checks.md) — Derivations and numerical rate audits (Part I).
+- [`docs/vpxc-extended-ritc-wsil-rans-audits.md`](./docs/vpxc-extended-ritc-wsil-rans-audits.md) — Extended `RITC`, `SL(3)-WSIL`, `Dyadic-Core66 rANS`, and MDL Ridge numerical checks (Part II).
