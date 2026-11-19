@@ -387,7 +387,7 @@ void check_planes(const std::vector<Plane>& planes) {
 }  // namespace
 
 std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_levels, int effort,
-                                    const std::vector<Halo>* halos, bool use_static) {
+                                    const std::vector<Halo>* halos, bool use_static, int sheaf_mode) {
   check_planes(planes);
   const int height = planes[0].height;
   const int width = planes[0].width;
@@ -415,7 +415,7 @@ std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_le
   if (effort >= 3 && use_static) feature_mask |= kIssm;
 
   std::vector<Tower> towers;
-  for (const Plane& plane : planes) towers.push_back(forward_tower(plane, nlevels, false));
+  for (const Plane& plane : planes) towers.push_back(forward_tower(plane, nlevels, sheaf_mode == 1));
   std::vector<std::vector<Plane>> ch_recons;
   std::vector<std::vector<Plane>> ch_resids;
   std::vector<Plane> coarse_ref;
@@ -867,7 +867,7 @@ std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_le
         full.samples[i] = sample;
         resid.samples[i] = sample;
       }
-      current = lift_inverse(full, spec.valid, false);
+      current = lift_inverse(full, spec.valid, sheaf_mode == 1);
       level_recons[static_cast<size_t>(level)] = current;
       level_resids[static_cast<size_t>(level)] = std::move(resid);
       prev = &level_resids[static_cast<size_t>(level)];
@@ -882,7 +882,10 @@ std::vector<Plane> decode_slgf_v3(const uint8_t* data, size_t size, int height, 
                                   const std::vector<Halo>* halos) {
   if (size < 1) throw CodecError("truncated SLGF tile");
   Reader reader{data, size, 0};
-  const int nlevels = reader.u8("truncated SLGF tile");
+  const int head = reader.u8("truncated SLGF tile");
+  // Bit 4 selects the sheaf-weighted lift. Older streams leave it clear.
+  const int sheaf_mode = (head & 0x10) ? 1 : 0;
+  const int nlevels = head & 0x0f;
   if (nlevels == 0) {
     std::vector<Plane> planes;
     const Mask mask(height, width, true);
@@ -1104,7 +1107,7 @@ std::vector<Plane> decode_slgf_v3(const uint8_t* data, size_t size, int height, 
         full.samples[i] = sample;
         resid.samples[i] = sample;
       }
-      current = lift_inverse(full, spec.valid, false);
+      current = lift_inverse(full, spec.valid, sheaf_mode == 1);
       level_recons[static_cast<size_t>(level)] = current;
       level_resids[static_cast<size_t>(level)] = std::move(resid);
       prev = &level_resids[static_cast<size_t>(level)];
