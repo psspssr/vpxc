@@ -1,4 +1,5 @@
 #include "vpxc/codec.hpp"
+#include "vpxc/wp.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -21,6 +22,7 @@ constexpr uint8_t kProfileQxRice = 3;
 constexpr uint8_t kProfileQxRans = 4;
 constexpr uint8_t kProfilePalette = 5;
 constexpr uint8_t kProfileSlgf = 6;
+constexpr uint8_t kProfileWp = 7;
 constexpr uint8_t kFlagSheaf = 1;
 constexpr uint8_t kColorExtra = 1;
 
@@ -539,6 +541,13 @@ std::optional<std::vector<uint8_t>> palette_record(const Image& image, int y0, i
   return out;
 }
 
+std::vector<uint8_t> wp_record(const std::vector<Plane>& planes) {
+  const auto payload = encode_wp(planes);
+  std::vector<uint8_t> out{kProfileWp, 0, 0};
+  append_prefixed(out, payload);
+  return out;
+}
+
 std::vector<uint8_t> shortest(std::vector<std::vector<uint8_t>> records) {
   if (records.empty()) throw CodecError("no tile candidate");
   size_t best = 0;
@@ -563,6 +572,7 @@ std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int
       return std::move(*palette);
     }
     if (std::strcmp(profile, "slgf") == 0) return slgf_record(planes, effort, version, halos, true);
+    if (std::strcmp(profile, "wp") == 0) return wp_record(planes);
     if (std::strcmp(profile, "slgf-zero") == 0) return slgf_record(planes, std::min(effort, 2), version, halos, false);
     if (std::strcmp(profile, "qx-rice") == 0 || std::strcmp(profile, "qx-rans") == 0) {
       auto records = quincunx_candidates(planes, std::strcmp(profile, "qx-rans") == 0 ? "rans" : "rice");
@@ -574,6 +584,8 @@ std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int
   std::vector<std::vector<uint8_t>> candidates;
   candidates.push_back(raw_record(image, y0, y1, x0, x1));
   candidates.push_back(slgf_record(planes, effort, version, halos, true));
+  // The weighted predictor is available as profile "wp". On Kodak its Core66
+  // files are larger than the quincunx tile, so the automatic search does not run it.
   if (auto palette = palette_record(image, y0, y1, x0, x1, effort)) candidates.push_back(std::move(*palette));
   if ((effort >= 2 || std::min(height, width) < 32) && static_cast<int64_t>(height) * width <= 65536) {
     candidates.push_back(raster_record(planes, true));
@@ -839,6 +851,9 @@ Image decode_image(const uint8_t* data, size_t size) {
         store_planes(out, y0, x0, apply_color_inverse(planes, transform));
       } else if (prof == kProfileQxRice || prof == kProfileQxRans) {
         auto planes = decode_qx_planes(payload, th, tw, channels, nlevels, (flags & kFlagSheaf) != 0, prof == kProfileQxRans);
+        store_planes(out, y0, x0, apply_color_inverse(planes, transform));
+      } else if (prof == kProfileWp) {
+        auto planes = decode_wp(payload.data(), payload.size(), th, tw, channels);
         store_planes(out, y0, x0, apply_color_inverse(planes, transform));
       } else if (prof == kProfilePalette) {
         decode_palette(out, y0, x0, payload, th, tw, flags);
