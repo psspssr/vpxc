@@ -1,12 +1,14 @@
 [project]
 name = "vpxc"
-version = "0.1.0"
-description = "SLGF-Zero lossless image codec"
+version = "0.2.0"
+description = "Lossless image compression with Symplectic Lattice-Gauge Flows (SLGF)"
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.22"]
 
 [project.optional-dependencies]
 images = ["pillow>=9"]
+bench = ["pillow>=9", "imagecodecs>=2023.1"]
 
 [project.scripts]
 vpxc = "vpxc.cli:main"
