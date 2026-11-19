@@ -98,6 +98,11 @@ def encode(
     ``3``) and writes the shortest exact tile representation. ``version=2``
     writes the previous container.
     """
+    from vpxc.native import encode_native
+
+    native = encode_native(image, tile=tile, effort=effort, profile=profile, version=version)
+    if native is not None:
+        return native
     src, dtype = _normalize(image)
     if tile < 8 or tile > 4096:
         raise CodecError("tile size must be between 8 and 4096")
@@ -180,6 +185,11 @@ def encode(
 
 def decode(data: bytes) -> np.ndarray:
     """Exact integer inverse of :func:`encode`. Raises :class:`CodecError` on bad data."""
+    from vpxc.native import decode_native
+
+    native = decode_native(data)
+    if native is not None:
+        return native
     if len(data) < _HEADER.size:
         raise CodecError("truncated header")
     (

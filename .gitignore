@@ -5,6 +5,7 @@ __pycache__/
 *.vpxc
 .venv/
 *.so
+cpp/build/
 
 # LaTeX build and auxiliary artifacts
 *.aux
