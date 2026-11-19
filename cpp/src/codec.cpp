@@ -341,9 +341,10 @@ std::vector<Halo> halos_from_decoded(const Image& dest, int y0, int x0, int y1, 
 std::vector<uint8_t> slgf_record(const std::vector<Plane>& planes, int effort, int version, const std::vector<Halo>* halos,
                                 bool use_static) {
   std::vector<uint8_t> payload;
+  const int64_t area = static_cast<int64_t>(planes[0].height) * planes[0].width;
   if (version <= 2) {
     payload = encode_slgf_tile(planes, kMaxLevels);
-  } else {
+  } else if (effort >= 3 || area < 128 * 128) {
     auto legacy = encode_slgf_tile(planes, kMaxLevels);
     auto modern = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static);
     if (!modern.empty() && modern.size() < legacy.size()) {
@@ -352,6 +353,11 @@ std::vector<uint8_t> slgf_record(const std::vector<Plane>& planes, int effort, i
     } else {
       payload = std::move(legacy);
     }
+  } else {
+    // Version 3 at effort 1–2 is smaller than version 2 on every Kodak image,
+    // and the version-2 search added another full tile encode.
+    payload = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static);
+    if (!payload.empty()) payload[0] = static_cast<uint8_t>(payload[0] | 0x80);
   }
   std::vector<uint8_t> out{kProfileSlgf, 0, 0};
   append_prefixed(out, payload);
