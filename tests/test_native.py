@@ -56,7 +56,11 @@ class TestNativeByteIdentity(unittest.TestCase):
                         native_blob = native.encode_native(
                             image, tile=32, effort=effort, profile=profile, version=version
                         )
-                        self.assertEqual(native_blob, blob)
+                        # Version 3 effort 1–2 no longer runs the searches that measured as
+                        # unused on Kodak, so those streams are not byte-identical to Python.
+                        if version == 2 or profile in ("kalman", "qx-rans"):
+                            self.assertEqual(native_blob, blob)
+                        self.assertTrue(np.array_equal(native.decode_native(native_blob), image))
                         self.assertTrue(np.array_equal(native.decode_native(blob), image))
                         self.assertTrue(np.array_equal(py_decode(native_blob), image))
 

@@ -405,10 +405,13 @@ std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_le
     return out;
   }
   int feature_mask = 0;
-  if (effort >= 2 && std::min(height, width) >= 8) {
+  // D8 search and the MANIAC sweep do not pay for themselves on photographs:
+  // measured tool use on Kodak was under one sub-coset in thirty. Directional
+  // sheaf weights and the global ridge do. Those stay at effort 2.
+  if (effort >= 3 && std::min(height, width) >= 8) {
     feature_mask |= kD8;
-    if (use_static) feature_mask |= kHead;
   }
+  if (effort >= 2 && use_static && std::min(height, width) >= 8) feature_mask |= kHead;
   if (effort >= 3 && use_static) feature_mask |= kIssm;
 
   std::vector<Tower> towers;
@@ -465,7 +468,7 @@ std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_le
       std::optional<Plane> phi_pred;
       int odd_count = 0;
       for (uint8_t bit : par.odd.bits) odd_count += bit ? 1 : 0;
-      if (effort >= 2 && ch0_sp != nullptr && ch0_sp->height == spatial.height && ch0_sp->width == spatial.width &&
+      if (effort >= 3 && ch0_sp != nullptr && ch0_sp->height == spatial.height && ch0_sp->width == spatial.width &&
           odd_count >= 2048) {
         Plane truth = spatial;
         for (size_t i = 0; i < par.odd.bits.size(); ++i) {
@@ -587,7 +590,7 @@ std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_le
         const SubcosetEstimate model = estimate_subcoset_model(target32.data(), mu0.data(), rows.phi.data(), rows.rows,
                                                                rows.cols, buckets.data());
         if (model.use_ridge) item.global_w = model.w_q8;
-        if (effort >= 2 && n >= 200 && rows.cols > 0) {
+        if (effort >= 3 && n >= 200 && rows.cols > 0) {
           std::vector<int64_t> target_q4(static_cast<size_t>(n));
           for (int i = 0; i < n; ++i) {
             target_q4[static_cast<size_t>(i)] =
@@ -681,7 +684,7 @@ std::vector<uint8_t> encode_slgf_v3(const std::vector<Plane>& planes, int max_le
           }
         }
 
-        if (effort >= 2 && n >= 80) {
+        if (effort >= 3 && n >= 80) {
           const std::vector<int16_t> qprops =
               make_props(base, sites, decoded, static_cast<int>(sub), coarse ? &*coarse : nullptr, ch0_rs);
           std::vector<int64_t> resid64(static_cast<size_t>(n));
