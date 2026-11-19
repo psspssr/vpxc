@@ -1,17 +1,23 @@
-"""Tile container for the SLGF-Zero lossless codec.
+"""Tile container for the SLGF lossless image codec.
 
-Stage 0 picks a reversible channel lift (identity, YCoCg-R, subtract-base, or a
-Q12 shear). Each tile then stores the smallest of:
+Stage 0 selects a reversible channel bijection over ``Z^C`` (identity, YCoCg-R,
+subtract-base, 2-D-gradient Q12 shear, or 10-multiplier SL(3)-WSIL eigenframe,
+plus optional 4th-channel coupling). Each tile then stores the smallest exact
+representation among:
 
-- raw samples (worst-case expansion is one profile byte per tile)
-- raster median prediction with adaptive Rice
-- the same raster predictor with causal Sheaf-Kalman blending (M <= 4)
-- a 4-level sheaf or flat quincunx tower, coarse band in Rice, detail bands in
-  either Rice or Dyadic-Core66 rANS
-- a palette plus Rice-coded indexes, when the tile uses at most 256 colors
+- ``slgf``: unified 4-level ``Q^2 = 2I`` linear quincunx tower + 3 causal
+  sub-cosets + 4-way normative ``Q15.16``/``Q1.30`` ``I-SSM`` + closed-form
+  Cholesky MDL Ridge head (``phi_head``) + CFA/4:2:0 parity cross-channel taps
+  (``phi_acq``) + bimodal Student-t ``Dyadic-Core66 rANS``
+- ``kalman``: causal Median Edge Detection with ``D_8``-equivariant Sheaf-Kalman
+  patch fusion (collapsing to exact ``D_8`` copy when ``sigma_eta -> 0``)
+- ``palette``: zero-rounding palette mode for tiles with ``<= 512`` unique colors
+  (grayscale or multi-channel)
+- ``qx-rice`` / ``qx-rans`` / ``raster``: standalone ablation profiles
+- ``raw``: uncompressed tile bypass capping worst-case expansion on noise
 
-The quincunx sheaf weights and the color-lift parameters are exactly invertible,
-so a decoded tile matches the input samples before the CRC is checked.
+All decoding paths are 100% IEEE-754-free integer operations verified by a
+whole-image CRC-32 checksum.
 """
 
 from __future__ import annotations
@@ -24,9 +30,11 @@ import numpy as np
 
 from vpxc.color import (
     MODE_IDENTITY,
-    choose_color,
-    forward_channels,
-    inverse_channels,
+    MODE_WSIL,
+    ColorTransform,
+    apply_color_forward,
+    apply_color_inverse,
+    choose_color_transform,
 )
 from vpxc.entropy import (
     decode_dyadic_rans,
@@ -44,12 +52,15 @@ from vpxc.lattice import (
     parity_masks,
     unpack_even,
 )
+from vpxc.slgf_model import decode_slgf_tile, encode_slgf_tile
 from vpxc.spatial import decode_raster, encode_raster
+from vpxc.wsil import SL3Params
 
 MAGIC = b"VPXC"
-VERSION = 1
-TILE = 256
+VERSION = 2
+TILE = 768
 MAX_LEVELS = 4
+MAX_PALETTE_COLORS = 512
 
 PROFILE_RAW = 0
 PROFILE_RASTER = 1
@@ -57,10 +68,16 @@ PROFILE_KALMAN = 2
 PROFILE_QX_RICE = 3
 PROFILE_QX_RANS = 4
 PROFILE_PALETTE = 5
+PROFILE_SLGF = 6
+
+PROFILES = ("raw", "raster", "kalman", "qx-rice", "qx-rans", "palette", "slgf")
 
 FLAG_SHEAF = 1
+COLOR_FLAG_EXTRA = 1
 
-_HEADER = struct.Struct("<4sBBBBBhhhIIIH")
+_HEADER = struct.Struct("<4sBBBBBBIIIH")
+_SHEAR_STRUCT = struct.Struct("<hhh")
+_WSIL_STRUCT = struct.Struct("<BBBhhhhhhhhhh")
 
 
 def encode(
@@ -72,40 +89,76 @@ def encode(
 ) -> bytes:
     """Compress ``image`` (``uint8`` or ``uint16``, ``HxW`` or ``HxWx{1,3,4}``).
 
-    ``profile`` forces one tile coder (``raw``, ``raster``, ``kalman``,
-    ``qx-rice``, ``qx-rans``, ``palette``). The default compares every coder
-    enabled by ``effort`` and stores the smallest.
+    ``profile`` forces one tile coder (``slgf``, ``kalman``, ``palette``,
+    ``qx-rans``, ``qx-rice``, ``raster``, or ``raw``). By default ``encode``
+    evaluates the candidates enabled by ``effort`` (``1`` or ``2``) and writes
+    the shortest exact tile representation.
     """
     src, dtype = _normalize(image)
     if tile < 8 or tile > 4096:
         raise CodecError("tile size must be between 8 and 4096")
+    if effort not in (1, 2):
+        raise CodecError("effort must be 1 or 2")
     height, width, channels = _dims(src)
-    mode, perm, shear = _select_color(src)
+    color_tr = _select_color(src)
     crc = zlib.crc32(_sample_bytes(src)) & 0xFFFFFFFF
-    header = _HEADER.pack(
-        MAGIC,
-        VERSION,
-        1 if dtype == np.uint8 else 2,
-        channels,
-        mode,
-        perm,
-        int(shear[0]),
-        int(shear[1]),
-        int(shear[2]),
-        width,
-        height,
-        crc,
-        tile,
+
+    has_extra = channels == 4 and any(w != 0 for w in color_tr.extra_weights)
+    cflags = COLOR_FLAG_EXTRA if has_extra else 0
+    header = bytearray(
+        _HEADER.pack(
+            MAGIC,
+            VERSION,
+            1 if dtype == np.uint8 else 2,
+            channels,
+            color_tr.mode,
+            color_tr.perm,
+            cflags,
+            width,
+            height,
+            crc,
+            tile,
+        )
     )
-    parts = [header]
+    if color_tr.mode == MODE_WSIL:
+        w = color_tr.wsil
+        header += _WSIL_STRUCT.pack(
+            w.perm[0],
+            w.perm[1],
+            w.perm[2],
+            w.u01,
+            w.u02,
+            w.u12,
+            w.l10,
+            w.l20,
+            w.l21,
+            w.s1,
+            w.s1_inv,
+            w.s2,
+            w.s2_inv,
+        )
+    elif color_tr.mode != MODE_IDENTITY:
+        header += _SHEAR_STRUCT.pack(
+            int(color_tr.shear[0]),
+            int(color_tr.shear[1]),
+            int(color_tr.shear[2]),
+        )
+    if has_extra:
+        header += _SHEAR_STRUCT.pack(
+            int(color_tr.extra_weights[0]),
+            int(color_tr.extra_weights[1]),
+            int(color_tr.extra_weights[2]),
+        )
+
+    parts: list[bytes] = [bytes(header)]
     for y0, y1, x0, x1 in _tiles(height, width, tile):
-        block = src[y0:y1, x0:x1] if src.ndim == 3 else src[y0:y1, x0:x1]
-        parts.append(_encode_tile(block, mode, perm, shear, effort, profile))
+        block = src[y0:y1, x0:x1]
+        parts.append(_encode_tile(block, color_tr, effort, profile))
     return b"".join(parts)
 
 
 def decode(data: bytes) -> np.ndarray:
-    """Inverse of :func:`encode`. Raises :class:`CodecError` on a bad payload."""
+    """Exact integer inverse of :func:`encode`. Raises :class:`CodecError` on bad data."""
     if len(data) < _HEADER.size:
         raise CodecError("truncated header")
     (
@@ -115,35 +168,81 @@ def decode(data: bytes) -> np.ndarray:
         channels,
         mode,
         perm,
-        a,
-        c,
-        d,
+        cflags,
         width,
         height,
         crc,
         tile,
     ) = _HEADER.unpack_from(data, 0)
     if magic != MAGIC or version != VERSION:
-        raise CodecError("not a vpxc version-1 bitstream")
+        raise CodecError("not a vpxc version-2 bitstream")
     if bps not in (1, 2) or channels not in (1, 3, 4):
         raise CodecError("unsupported sample format")
-    if width <= 0 or height <= 0 or tile < 8:
+    if width <= 0 or height <= 0 or tile < 8 or width > 20000 or height > 20000:
         raise CodecError("invalid geometry")
+
+    pos = _HEADER.size
+    shear = (0, 0, 0)
+    wsil = SL3Params()
+    if mode == MODE_WSIL:
+        if pos + _WSIL_STRUCT.size > len(data):
+            raise CodecError("truncated WSIL header")
+        vals = _WSIL_STRUCT.unpack_from(data, pos)
+        pos += _WSIL_STRUCT.size
+        p_tup = (int(vals[0]), int(vals[1]), int(vals[2]))
+        if sorted(p_tup) != [0, 1, 2]:
+            raise CodecError("invalid WSIL channel permutation")
+        wsil = SL3Params(
+            perm=p_tup,
+            u01=int(vals[3]),
+            u02=int(vals[4]),
+            u12=int(vals[5]),
+            l10=int(vals[6]),
+            l20=int(vals[7]),
+            l21=int(vals[8]),
+            s1=int(vals[9]),
+            s1_inv=int(vals[10]),
+            s2=int(vals[11]),
+            s2_inv=int(vals[12]),
+        )
+    elif mode != MODE_IDENTITY:
+        if pos + _SHEAR_STRUCT.size > len(data):
+            raise CodecError("truncated color header")
+        a, c, d = _SHEAR_STRUCT.unpack_from(data, pos)
+        pos += _SHEAR_STRUCT.size
+        shear = (int(a), int(c), int(d))
+
+    extra_weights = (0, 0, 0)
+    if cflags & COLOR_FLAG_EXTRA:
+        if pos + _SHEAR_STRUCT.size > len(data):
+            raise CodecError("truncated 4th-channel color header")
+        ew0, ew1, ew2 = _SHEAR_STRUCT.unpack_from(data, pos)
+        pos += _SHEAR_STRUCT.size
+        extra_weights = (int(ew0), int(ew1), int(ew2))
+
+    color_tr = ColorTransform(
+        mode=int(mode),
+        perm=int(perm),
+        shear=shear,
+        wsil=wsil,
+        extra_weights=extra_weights,
+    )
+
     dtype = np.uint8 if bps == 1 else np.uint16
     if channels == 1:
         out = np.empty((height, width), dtype)
     else:
         out = np.empty((height, width, channels), dtype)
-    pos = _HEADER.size
-    shear = (int(a), int(c), int(d))
+
     for y0, y1, x0, x1 in _tiles(height, width, tile):
         block, pos = _decode_tile(
-            data, pos, y1 - y0, x1 - x0, channels, dtype, mode, perm, shear
+            data, pos, y1 - y0, x1 - x0, channels, dtype, color_tr
         )
         if channels == 1:
             out[y0:y1, x0:x1] = block
         else:
             out[y0:y1, x0:x1, :] = block
+
     if pos != len(data):
         raise CodecError("trailing bytes after the last tile")
     got = zlib.crc32(_sample_bytes(out)) & 0xFFFFFFFF
@@ -187,14 +286,16 @@ def _sample_bytes(src: np.ndarray) -> bytes:
     return np.ascontiguousarray(src).astype("<u2", copy=False).tobytes()
 
 
-def _select_color(src: np.ndarray) -> tuple[int, int, tuple[int, int, int]]:
+def _select_color(src: np.ndarray) -> ColorTransform:
     if src.ndim != 3 or src.shape[2] < 3:
-        return MODE_IDENTITY, 0, (0, 0, 0)
-    rgb = [src[:, :, i].astype(np.int32) for i in range(3)]
-    return choose_color(rgb)
+        return ColorTransform()
+    chans = [src[:, :, i].astype(np.int32) for i in range(src.shape[2])]
+    return choose_color_transform(chans)
 
 
-def _tiles(height: int, width: int, tile: int) -> Iterable[tuple[int, int, int, int]]:
+def _tiles(
+    height: int, width: int, tile: int
+) -> Iterable[tuple[int, int, int, int]]:
     for y0 in range(0, height, tile):
         for x0 in range(0, width, tile):
             yield y0, min(height, y0 + tile), x0, min(width, x0 + tile)
@@ -208,25 +309,23 @@ def _split(tile: np.ndarray) -> list[np.ndarray]:
 
 def _encode_tile(
     tile: np.ndarray,
-    mode: int,
-    perm: int,
-    shear: tuple[int, int, int],
+    color_tr: ColorTransform,
     effort: int,
     profile: str | None,
 ) -> bytes:
-    planes = forward_channels(_split(tile), mode, perm, shear)
+    planes = apply_color_forward(_split(tile), color_tr)
     if profile is not None:
         forced = _forced_record(tile, planes, profile)
         if forced is None:
             raise CodecError(f"profile {profile} does not apply to this tile")
         return forced
-    candidates = [_raw_record(tile), _raster_record(planes, kalman=False)]
-    if effort >= 2:
+
+    candidates = [_raw_record(tile), _slgf_record(planes)]
+    palette = _palette_record(tile, effort=effort)
+    if palette is not None:
+        candidates.append(palette)
+    if (effort >= 2 or min(tile.shape[:2]) < 32) and tile.shape[0] * tile.shape[1] <= 65536:
         candidates.append(_raster_record(planes, kalman=True))
-        palette = _palette_record(tile)
-        if palette is not None:
-            candidates.append(palette)
-    candidates.extend(_quincunx_candidates(planes, effort))
     return min(candidates, key=len)
 
 
@@ -240,13 +339,14 @@ def _forced_record(
     if profile == "kalman":
         return _raster_record(planes, kalman=True)
     if profile == "palette":
-        return _palette_record(tile)
+        return _palette_record(tile, effort=2)
+    if profile == "slgf":
+        return _slgf_record(planes)
     if profile in ("qx-rice", "qx-rans"):
         records = _quincunx_candidates(
             planes, effort=2, entropies=("rans" if profile == "qx-rans" else "rice",)
         )
         if not records:
-            # Too small to lift: the raster coder is the quincunx coder with zero levels.
             return _raster_record(planes, kalman=False)
         return min(records, key=len)
     raise CodecError(f"unknown profile {profile}")
@@ -256,13 +356,18 @@ def _raw_record(tile: np.ndarray) -> bytes:
     return bytes([PROFILE_RAW]) + _sample_bytes(tile)
 
 
+def _slgf_record(planes: list[np.ndarray]) -> bytes:
+    payload = encode_slgf_tile(planes, max_levels=MAX_LEVELS)
+    return bytes([PROFILE_SLGF, 0, 0]) + _len_prefix(payload)
+
+
 def _raster_record(planes: list[np.ndarray], kalman: bool) -> bytes:
     blobs = []
     mask = np.ones(planes[0].shape, np.bool_)
     for plane in planes:
         blobs.append(_len_prefix(encode_raster(plane, mask, kalman)))
-    profile = PROFILE_KALMAN if kalman else PROFILE_RASTER
-    return bytes([profile, 0, 0]) + _len_prefix(b"".join(blobs))
+    prof = PROFILE_KALMAN if kalman else PROFILE_RASTER
+    return bytes([prof, 0, 0]) + _len_prefix(b"".join(blobs))
 
 
 def _quincunx_candidates(
@@ -279,8 +384,6 @@ def _quincunx_candidates(
         towers = [forward_tower(plane, MAX_LEVELS, sheaf) for plane in planes]
         analyses.append((sheaf, towers, _tower_cost(towers)))
     analyses.sort(key=lambda item: item[2])
-    # Keep the smoother tower, and the other one only when it is clearly close
-    # enough that entropy coding (not the L1 proxy) might prefer it.
     chosen = [analyses[0]]
     if len(analyses) == 2 and analyses[1][2] <= analyses[0][2] * 1.02 + 0.05:
         chosen.append(analyses[1])
@@ -327,31 +430,112 @@ def _qx_record(towers, sheaf: bool, entropy: str) -> bytes:
                 blob = encode_rice_values(lifted, odd, ctx, causal_mu=False)
             blobs.append(_len_prefix(blob))
     flags = FLAG_SHEAF if sheaf else 0
-    profile = PROFILE_QX_RANS if entropy == "rans" else PROFILE_QX_RICE
-    return bytes([profile, flags, 0 if nlevels is None else nlevels]) + _len_prefix(
+    prof = PROFILE_QX_RANS if entropy == "rans" else PROFILE_QX_RICE
+    return bytes([prof, flags, 0 if nlevels is None else nlevels]) + _len_prefix(
         b"".join(blobs)
     )
 
 
-def _palette_record(tile: np.ndarray) -> bytes | None:
-    if tile.ndim != 3:
+def _palette_med_residuals(index: np.ndarray) -> np.ndarray:
+    """Vectorized causal MED prediction residuals on a 2-D palette index plane."""
+    idx = index.astype(np.int32, copy=False)
+    h, w = idx.shape
+    out = np.empty((h, w), dtype=np.int32)
+    out[0, 0] = idx[0, 0]
+    if w > 1:
+        out[0, 1:] = idx[0, 1:] - idx[0, :-1]
+    if h > 1:
+        out[1:, 0] = idx[1:, 0] - idx[:-1, 0]
+    if h > 1 and w > 1:
+        left = idx[1:, :-1]
+        up = idx[:-1, 1:]
+        ul = idx[:-1, :-1]
+        hi = np.maximum(left, up)
+        lo = np.minimum(left, up)
+        pred = np.where(ul < lo, hi, np.where(ul > hi, lo, left + up - ul))
+        out[1:, 1:] = idx[1:, 1:] - pred
+    return out
+
+
+def _palette_med_reconstruct(resid: np.ndarray) -> np.ndarray:
+    h, w = resid.shape
+    rows = resid.astype(np.int32, copy=False).tolist()
+    out = [[0] * w for _ in range(h)]
+    for y in range(h):
+        row = out[y]
+        rrow = rows[y]
+        up_row = out[y - 1] if y > 0 else None
+        for x in range(w):
+            if y == 0 and x == 0:
+                row[0] = rrow[0]
+            elif y == 0:
+                row[x] = row[x - 1] + rrow[x]
+            elif x == 0 and up_row is not None:
+                row[0] = up_row[0] + rrow[0]
+            else:
+                assert up_row is not None
+                left = row[x - 1]
+                up = up_row[x]
+                ul = up_row[x - 1]
+                hi = left if left > up else up
+                lo = up if left > up else left
+                if ul < lo:
+                    pred = hi
+                elif ul > hi:
+                    pred = lo
+                else:
+                    pred = left + up - ul
+                row[x] = pred + rrow[x]
+    return np.asarray(out, dtype=np.int32)
+
+
+def _palette_record(tile: np.ndarray, effort: int = 2) -> bytes | None:
+    """Zero-rounding palette mode for grayscale and color tiles (<= 512 unique colors)."""
+    if tile.ndim == 2:
+        flat = np.ascontiguousarray(tile).reshape(-1, 1)
+    elif tile.ndim == 3:
+        flat = np.ascontiguousarray(tile).reshape(-1, tile.shape[-1])
+    else:
         return None
-    flat = np.ascontiguousarray(tile).reshape(-1, tile.shape[-1])
     if flat.shape[0] == 0:
         return None
+
     void_dt = np.dtype((np.void, flat.dtype.itemsize * flat.shape[1]))
     keys = np.ascontiguousarray(flat).view(void_dt).ravel()
-    uniq = np.unique(keys)
-    if uniq.size == 0 or uniq.size > 256:
+    uniq, inv = np.unique(keys, return_inverse=True)
+    if uniq.size == 0 or uniq.size > MAX_PALETTE_COLORS:
         return None
-    index = np.searchsorted(uniq, keys).astype(np.int32).reshape(tile.shape[:2])
+
     colors = np.ascontiguousarray(uniq.view(flat.dtype).reshape(-1, flat.shape[1]))
+    lum_order = np.argsort(colors.astype(np.int64).sum(axis=1), kind="stable")
+    rank = np.empty_like(lum_order)
+    rank[lum_order] = np.arange(colors.shape[0])
+    colors = np.ascontiguousarray(colors[lum_order])
+    index = rank[inv].astype(np.int32).reshape(tile.shape[:2])
+
+    mask = np.ones(index.shape, np.bool_)
+    zeros_shift = np.zeros(index.shape, np.uint8)
+    med_res = _palette_med_residuals(index)
+    # Core66 rANS breaks the 1-bit-per-pixel floor of Rice on sparse UI index maps:
+    b_rans = encode_dyadic_rans(med_res, mask, zeros_shift)
+    mode_flag = 2
+    chosen_idx_blob = b_rans
+
+    b_med = encode_raster(index, mask, kalman=False)
+    if len(b_med) < len(chosen_idx_blob):
+        mode_flag = 0
+        chosen_idx_blob = b_med
+    if effort >= 2 and index.size <= 65536:
+        b_kal = encode_raster(index, mask, kalman=True)
+        if len(b_kal) < len(chosen_idx_blob):
+            mode_flag = 1
+            chosen_idx_blob = b_kal
+
     payload = bytearray()
     payload += int(colors.shape[0]).to_bytes(2, "little")
     payload += _sample_bytes(colors)
-    mask = np.ones(index.shape, np.bool_)
-    payload += _len_prefix(encode_raster(index, mask, kalman=False))
-    return bytes([PROFILE_PALETTE, 0, 0]) + _len_prefix(bytes(payload))
+    payload += _len_prefix(chosen_idx_blob)
+    return bytes([PROFILE_PALETTE, mode_flag, 0]) + _len_prefix(bytes(payload))
 
 
 def _len_prefix(blob: bytes) -> bytes:
@@ -367,15 +551,13 @@ def _decode_tile(
     width: int,
     channels: int,
     dtype: np.dtype,
-    mode: int,
-    perm: int,
-    shear: tuple[int, int, int],
+    color_tr: ColorTransform,
 ) -> tuple[np.ndarray, int]:
     if pos >= len(data):
         raise CodecError("truncated tile")
-    profile = data[pos]
+    prof = data[pos]
     pos += 1
-    if profile == PROFILE_RAW:
+    if prof == PROFILE_RAW:
         nbytes = height * width * channels * (1 if dtype == np.uint8 else 2)
         if pos + nbytes > len(data):
             raise CodecError("truncated raw tile")
@@ -385,8 +567,11 @@ def _decode_tile(
             arr = np.frombuffer(raw, dtype=np.uint8)
         else:
             arr = np.frombuffer(raw, dtype="<u2")
-        arr = arr.reshape((height, width) if channels == 1 else (height, width, channels))
+        arr = arr.reshape(
+            (height, width) if channels == 1 else (height, width, channels)
+        )
         return arr.copy(), pos
+
     if pos + 2 + 4 > len(data):
         raise CodecError("truncated tile header")
     flags = data[pos]
@@ -398,13 +583,18 @@ def _decode_tile(
         raise CodecError("truncated tile payload")
     payload = data[pos : pos + length]
     pos += length
-    if profile in (PROFILE_RASTER, PROFILE_KALMAN):
-        planes = _decode_raster_planes(
-            payload, height, width, channels, profile == PROFILE_KALMAN
-        )
-        restored = inverse_channels(planes, mode, perm, shear)
+
+    if prof == PROFILE_SLGF:
+        planes = decode_slgf_tile(payload, height, width, channels)
+        restored = apply_color_inverse(planes, color_tr)
         return _cast(restored, dtype, channels), pos
-    if profile in (PROFILE_QX_RICE, PROFILE_QX_RANS):
+    if prof in (PROFILE_RASTER, PROFILE_KALMAN):
+        planes = _decode_raster_planes(
+            payload, height, width, channels, prof == PROFILE_KALMAN
+        )
+        restored = apply_color_inverse(planes, color_tr)
+        return _cast(restored, dtype, channels), pos
+    if prof in (PROFILE_QX_RICE, PROFILE_QX_RANS):
         planes = _decode_qx_planes(
             payload,
             height,
@@ -412,13 +602,16 @@ def _decode_tile(
             channels,
             nlevels,
             bool(flags & FLAG_SHEAF),
-            profile == PROFILE_QX_RANS,
+            prof == PROFILE_QX_RANS,
         )
-        restored = inverse_channels(planes, mode, perm, shear)
+        restored = apply_color_inverse(planes, color_tr)
         return _cast(restored, dtype, channels), pos
-    if profile == PROFILE_PALETTE:
-        return _decode_palette(payload, height, width, channels, dtype), pos
-    raise CodecError(f"unknown tile profile {profile}")
+    if prof == PROFILE_PALETTE:
+        return (
+            _decode_palette(payload, height, width, channels, dtype, int(flags)),
+            pos,
+        )
+    raise CodecError(f"unknown tile profile {prof}")
 
 
 def _read_prefixed(payload: bytes, cursor: int) -> tuple[bytes, int]:
@@ -492,11 +685,12 @@ def _decode_palette(
     width: int,
     channels: int,
     dtype: np.dtype,
+    mode_flag: int,
 ) -> np.ndarray:
     if len(payload) < 2:
         raise CodecError("truncated palette")
     ncolors = int.from_bytes(payload[0:2], "little")
-    if ncolors <= 0 or ncolors > 256:
+    if ncolors <= 0 or ncolors > MAX_PALETTE_COLORS:
         raise CodecError("palette size out of range")
     sample_bytes = 1 if dtype == np.uint8 else 2
     nbytes = ncolors * channels * sample_bytes
@@ -511,7 +705,14 @@ def _decode_palette(
     if cursor != len(payload):
         raise CodecError("palette tile has trailing bytes")
     mask = np.ones((height, width), np.bool_)
-    index = decode_raster(index_blob, (height, width), mask, False)
+    if mode_flag == 2:
+        zeros_shift = np.zeros((height, width), np.uint8)
+        resid = decode_dyadic_rans(index_blob, (height, width), mask, zeros_shift)
+        index = _palette_med_reconstruct(resid)
+    elif mode_flag in (0, 1):
+        index = decode_raster(index_blob, (height, width), mask, mode_flag == 1)
+    else:
+        raise CodecError(f"unknown palette mode flag {mode_flag}")
     if int(index.min()) < 0 or int(index.max()) >= ncolors:
         raise CodecError("palette index out of range")
     flat = colors[index.ravel()]
@@ -531,4 +732,3 @@ def _cast(planes: list[np.ndarray], dtype: np.dtype, channels: int) -> np.ndarra
     if lo < int(info.min) or hi > int(info.max):
         raise CodecError(f"decoded sample {lo}..{hi} outside {dtype.__name__}")
     return arr.astype(dtype, copy=False)
-
