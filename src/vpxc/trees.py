@@ -67,15 +67,14 @@ def _mad_bits(abs_resid: np.ndarray) -> float:
     n = int(abs_resid.size)
     if n <= 0:
         return 0.0
-    mad = int(abs_resid.sum()) // n + 1
-    return float(n) * math.log2(float(mad))
+    mad = float(abs_resid.sum()) / float(n) + 0.5
+    return float(n) * math.log2(mad)
 
 
 def _sigma_from_mad(abs_resid: np.ndarray) -> int:
     n = int(abs_resid.size)
-    mad = int(abs_resid.sum()) // max(n, 1)
     # E[|Student|] is a bit under sigma; map MAD in sample units onto Q8 scales.
-    target = mad * 320 + 48
+    target = (int(abs_resid.sum()) * 320) // max(n, 1) + 48
     table = np.asarray(SIGMA_Q8, dtype=np.int64)
     return int(np.argmin(np.abs(table - target)))
 

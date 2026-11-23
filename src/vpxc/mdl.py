@@ -48,7 +48,7 @@ def fit_ridge_q8(
         solved = np.linalg.solve(gram, xf.T @ yf)
     except np.linalg.LinAlgError:
         return None
-    weights = np.clip(np.round(solved), -WEIGHT_MAX_Q8, WEIGHT_MAX_Q8).astype(np.int64)
+    weights = np.clip(np.round(solved * 256.0), -WEIGHT_MAX_Q8, WEIGHT_MAX_Q8).astype(np.int64)
     if not np.any(weights):
         return None
     corr = (phi @ weights + 128) >> 8
