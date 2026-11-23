@@ -21,6 +21,8 @@ add_library(vpxc STATIC
   src/mdl.cpp
   src/slgf.cpp
   src/slgf_v3.cpp
+  src/wp.cpp
+  src/frontier.cpp
   src/codec.cpp
 )
 target_include_directories(vpxc PUBLIC include)

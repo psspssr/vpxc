@@ -72,7 +72,7 @@ PROFILE_QX_RANS = 4
 PROFILE_PALETTE = 5
 PROFILE_SLGF = 6
 
-PROFILES = ("raw", "raster", "kalman", "qx-rice", "qx-rans", "palette", "slgf", "slgf-zero")
+PROFILES = ("raw", "raster", "kalman", "qx-rice", "qx-rans", "palette", "slgf", "slgf-zero", "wp", "frontier")
 
 FLAG_SHEAF = 1
 COLOR_FLAG_EXTRA = 1
@@ -449,6 +449,8 @@ def _forced_record(
         if not records:
             return _raster_record(planes, kalman=False)
         return min(records, key=len)
+    if profile in ("wp", "frontier"):
+        raise CodecError(f"profile {profile} is implemented by the C++ codec")
     raise CodecError(f"unknown profile {profile}")
 
 

@@ -168,7 +168,7 @@ std::optional<std::vector<int64_t>> fit_ridge_q8(const int64_t* phi, int rows, i
   std::vector<int64_t> weights(static_cast<size_t>(cols));
   bool nonzero = false;
   for (int j = 0; j < cols; ++j) {
-    int64_t weight = round_half_even(solved[static_cast<size_t>(j)]);
+    int64_t weight = round_half_even(solved[static_cast<size_t>(j)] * 256.0);
     if (weight > kWeightMaxQ8) weight = kWeightMaxQ8;
     if (weight < -kWeightMaxQ8) weight = -kWeightMaxQ8;
     weights[static_cast<size_t>(j)] = weight;

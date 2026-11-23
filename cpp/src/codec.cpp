@@ -1,4 +1,6 @@
 #include "vpxc/codec.hpp"
+#include "vpxc/frontier.hpp"
+#include "vpxc/wp.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -21,6 +23,8 @@ constexpr uint8_t kProfileQxRice = 3;
 constexpr uint8_t kProfileQxRans = 4;
 constexpr uint8_t kProfilePalette = 5;
 constexpr uint8_t kProfileSlgf = 6;
+constexpr uint8_t kProfileWp = 7;
+constexpr uint8_t kProfileFrontier = 8;
 constexpr uint8_t kFlagSheaf = 1;
 constexpr uint8_t kColorExtra = 1;
 
@@ -344,18 +348,7 @@ std::vector<uint8_t> slgf_record(const std::vector<Plane>& planes, int effort, i
   const int64_t area = static_cast<int64_t>(planes[0].height) * planes[0].width;
   if (version <= 2) {
     payload = encode_slgf_tile(planes, kMaxLevels);
-  } else if (effort >= 3 || area < 128 * 128) {
-    auto legacy = encode_slgf_tile(planes, kMaxLevels);
-    auto modern = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static);
-    if (!modern.empty() && modern.size() < legacy.size()) {
-      modern[0] = static_cast<uint8_t>(modern[0] | 0x80);
-      payload = std::move(modern);
-    } else {
-      payload = std::move(legacy);
-    }
   } else {
-    // Version 3 at effort 1–2 is smaller than version 2 on every Kodak image,
-    // and the version-2 search added another full tile encode.
     auto flat = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static, 0);
     auto sheaf = encode_slgf_v3(planes, kMaxLevels, effort, halos, use_static, 1);
     if (!sheaf.empty() && sheaf.size() < flat.size()) {
@@ -365,6 +358,10 @@ std::vector<uint8_t> slgf_record(const std::vector<Plane>& planes, int effort, i
       payload = std::move(flat);
     }
     if (!payload.empty()) payload[0] = static_cast<uint8_t>(payload[0] | 0x80);
+    if (effort >= 3 || area < 128 * 128) {
+      auto legacy = encode_slgf_tile(planes, kMaxLevels);
+      if (payload.empty() || legacy.size() < payload.size()) payload = std::move(legacy);
+    }
   }
   std::vector<uint8_t> out{kProfileSlgf, 0, 0};
   append_prefixed(out, payload);
@@ -539,6 +536,37 @@ std::optional<std::vector<uint8_t>> palette_record(const Image& image, int y0, i
   return out;
 }
 
+std::vector<uint8_t> wp_record(const std::vector<Plane>& planes) {
+  const auto payload = encode_wp(planes);
+  std::vector<uint8_t> out{kProfileWp, 0, 0};
+  append_prefixed(out, payload);
+  return out;
+}
+
+std::vector<uint8_t> frontier_record(const Image& image, int y0, int y1, int x0, int x1, int effort) {
+  const auto raw_planes = split_region(image, y0, y1, x0, x1);
+  const auto payload = encode_frontier(raw_planes, image.u16, effort);
+  std::vector<uint8_t> out{kProfileFrontier, 0, 0};
+  append_prefixed(out, payload);
+  return out;
+}
+
+bool needs_legacy_planes(const Image& image, const EncodeOptions& opt) {
+  if (opt.profile != nullptr && opt.profile[0] != '\0') {
+    return std::strcmp(opt.profile, "raw") != 0 && std::strcmp(opt.profile, "palette") != 0 &&
+           std::strcmp(opt.profile, "frontier") != 0;
+  }
+  if (opt.version <= 2) return true;
+  for (int y0 = 0; y0 < image.height; y0 += opt.tile) {
+    for (int x0 = 0; x0 < image.width; x0 += opt.tile) {
+      const int th = std::min(image.height, y0 + opt.tile) - y0;
+      const int tw = std::min(image.width, x0 + opt.tile) - x0;
+      if (static_cast<int64_t>(th) * tw <= 65536) return true;
+    }
+  }
+  return false;
+}
+
 std::vector<uint8_t> shortest(std::vector<std::vector<uint8_t>> records) {
   if (records.empty()) throw CodecError("no tile candidate");
   size_t best = 0;
@@ -550,19 +578,25 @@ std::vector<uint8_t> shortest(std::vector<std::vector<uint8_t>> records) {
 
 std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int x1, const ColorTransform& transform,
                                 int effort, const char* profile, int version, const std::vector<Halo>* halos) {
-  const std::vector<Plane> planes = apply_color_forward(split_region(image, y0, y1, x0, x1), transform);
   const int height = y1 - y0;
   const int width = x1 - x0;
+  const int64_t area = static_cast<int64_t>(height) * width;
   if (profile != nullptr && profile[0] != '\0') {
     if (std::strcmp(profile, "raw") == 0) return raw_record(image, y0, y1, x0, x1);
-    if (std::strcmp(profile, "raster") == 0) return raster_record(planes, false);
-    if (std::strcmp(profile, "kalman") == 0) return raster_record(planes, true);
     if (std::strcmp(profile, "palette") == 0) {
       auto palette = palette_record(image, y0, y1, x0, x1, 2);
       if (!palette) throw CodecError(std::string("profile ") + profile + " does not apply to this tile");
       return std::move(*palette);
     }
+    if (std::strcmp(profile, "frontier") == 0) {
+      if (version <= 2) throw CodecError("profile frontier requires bitstream version 3");
+      return frontier_record(image, y0, y1, x0, x1, effort);
+    }
+    const std::vector<Plane> planes = apply_color_forward(split_region(image, y0, y1, x0, x1), transform);
+    if (std::strcmp(profile, "raster") == 0) return raster_record(planes, false);
+    if (std::strcmp(profile, "kalman") == 0) return raster_record(planes, true);
     if (std::strcmp(profile, "slgf") == 0) return slgf_record(planes, effort, version, halos, true);
+    if (std::strcmp(profile, "wp") == 0) return wp_record(planes);
     if (std::strcmp(profile, "slgf-zero") == 0) return slgf_record(planes, std::min(effort, 2), version, halos, false);
     if (std::strcmp(profile, "qx-rice") == 0 || std::strcmp(profile, "qx-rans") == 0) {
       auto records = quincunx_candidates(planes, std::strcmp(profile, "qx-rans") == 0 ? "rans" : "rice");
@@ -573,10 +607,16 @@ std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int
   }
   std::vector<std::vector<uint8_t>> candidates;
   candidates.push_back(raw_record(image, y0, y1, x0, x1));
-  candidates.push_back(slgf_record(planes, effort, version, halos, true));
+  if (version >= 3) {
+    candidates.push_back(frontier_record(image, y0, y1, x0, x1, effort));
+  }
   if (auto palette = palette_record(image, y0, y1, x0, x1, effort)) candidates.push_back(std::move(*palette));
-  if ((effort >= 2 || std::min(height, width) < 32) && static_cast<int64_t>(height) * width <= 65536) {
-    candidates.push_back(raster_record(planes, true));
+  if (version <= 2 || area <= 65536) {
+    const std::vector<Plane> planes = apply_color_forward(split_region(image, y0, y1, x0, x1), transform);
+    candidates.push_back(slgf_record(planes, effort, version, halos, true));
+    if ((effort >= 2 || std::min(height, width) < 32) && area <= 65536) {
+      candidates.push_back(raster_record(planes, true));
+    }
   }
   return shortest(std::move(candidates));
 }
@@ -686,8 +726,11 @@ std::vector<uint8_t> encode_image(const Image& image, const EncodeOptions& opt) 
   if (opt.version != 2 && opt.version != 3) throw CodecError("unsupported bitstream version");
   if (opt.version == 2 && opt.effort != 1 && opt.effort != 2) throw CodecError("version 2 effort must be 1 or 2");
   if (opt.version == 3 && (opt.effort < 1 || opt.effort > 3)) throw CodecError("effort must be 1, 2, or 3");
+  const bool use_legacy_planes = needs_legacy_planes(image, opt);
   const ColorTransform transform =
-      image.channels >= 3 ? choose_color_transform(split_region(image, 0, image.height, 0, image.width)) : ColorTransform{};
+      (image.channels >= 3 && use_legacy_planes)
+          ? choose_color_transform(split_region(image, 0, image.height, 0, image.width))
+          : ColorTransform{};
   const std::vector<uint8_t> samples = image_bytes(image);
   const uint32_t crc = crc32_bytes(samples.data(), samples.size());
   bool has_extra = false;
@@ -724,14 +767,16 @@ std::vector<uint8_t> encode_image(const Image& image, const EncodeOptions& opt) 
     for (int value : transform.extra) append_i16(out, value);
   }
   std::vector<Plane> lifted;
-  if (opt.version == 3) lifted = apply_color_forward(split_region(image, 0, image.height, 0, image.width), transform);
+  if (opt.version == 3 && use_legacy_planes) {
+    lifted = apply_color_forward(split_region(image, 0, image.height, 0, image.width), transform);
+  }
   for (int y0 = 0; y0 < image.height; y0 += opt.tile) {
     for (int x0 = 0; x0 < image.width; x0 += opt.tile) {
       const int y1 = std::min(image.height, y0 + opt.tile);
       const int x1 = std::min(image.width, x0 + opt.tile);
       std::vector<Halo> halos;
       const std::vector<Halo>* halo_ptr = nullptr;
-      if (opt.version == 3) {
+      if (opt.version == 3 && !lifted.empty()) {
         halos = make_halos(lifted, y0, x0, y1, x1);
         halo_ptr = &halos;
       }
@@ -840,6 +885,13 @@ Image decode_image(const uint8_t* data, size_t size) {
       } else if (prof == kProfileQxRice || prof == kProfileQxRans) {
         auto planes = decode_qx_planes(payload, th, tw, channels, nlevels, (flags & kFlagSheaf) != 0, prof == kProfileQxRans);
         store_planes(out, y0, x0, apply_color_inverse(planes, transform));
+      } else if (prof == kProfileWp) {
+        auto planes = decode_wp(payload.data(), payload.size(), th, tw, channels);
+        store_planes(out, y0, x0, apply_color_inverse(planes, transform));
+      } else if (prof == kProfileFrontier) {
+        if (version <= 2) throw CodecError("frontier tile requires bitstream version 3");
+        auto planes = decode_frontier(payload.data(), payload.size(), th, tw, channels, bps == 2);
+        store_planes(out, y0, x0, planes);
       } else if (prof == kProfilePalette) {
         decode_palette(out, y0, x0, payload, th, tw, flags);
       } else {
