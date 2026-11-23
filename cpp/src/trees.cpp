@@ -34,13 +34,12 @@ const int32_t* freq_row(int nu, int sigma, int frac) { return get_parametric_tab
 
 double mad_bits(int64_t abs_sum, int n) {
   if (n <= 0) return 0.0;
-  const double mad = static_cast<double>(abs_sum / n + 1);
+  const double mad = static_cast<double>(abs_sum) / static_cast<double>(n) + 0.5;
   return static_cast<double>(n) * std::log2(mad);
 }
 
 int sigma_from_sum(int64_t abs_sum, int n) {
-  const int64_t mad = abs_sum / std::max(n, 1);
-  const int64_t target = mad * 320 + 48;
+  const int64_t target = (abs_sum * 320) / std::max<int64_t>(n, 1) + 48;
   int best = 0;
   int64_t best_d = iabs(static_cast<int64_t>(SIGMA_Q8[0]) - target);
   for (int i = 1; i < NUM_SIGMAS; ++i) {

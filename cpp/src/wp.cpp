@@ -3,12 +3,10 @@
 #include "vpxc/entropy.hpp"
 #include "vpxc/error.hpp"
 
-#include <array>
 #include <algorithm>
-#include <cmath>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
-#include <iostream>
 #include <span>
 #include <vector>
 
@@ -16,7 +14,7 @@ namespace vpxc {
 namespace {
 
 constexpr int kExtra = 3;
-constexpr int kRound = (1 << kExtra) / 2 - 1;
+constexpr int kRound = (1 << kExtra) / 2;
 constexpr uint32_t kDiv[64] = {
     16777216, 8388608, 5592405, 4194304, 3355443, 2796202, 2396745, 2097152, 1864135, 1677721, 1525201,
     1398101,  1290555, 1198372, 1118481, 1048576, 986895,  932067,  883011,  838860,  798915,  762600,
@@ -36,7 +34,7 @@ struct WpHeader {
   int p3Ce = 2;
 };
 
-int floor_log2(uint64_t x) { return 63 - __builtin_clzll(x); }
+int floor_log2(uint64_t x) { return x ? (63 - __builtin_clzll(x)) : 0; }
 
 uint32_t error_weight(uint64_t x, uint32_t maxweight) {
   int shift = floor_log2(x + 1) - 5;
@@ -50,7 +48,7 @@ int64_t weighted_average(const int64_t pred[4], uint32_t w[4]) {
   uint32_t sum_w = 0;
   for (int i = 0; i < 4; ++i) sum_w += w[i];
   if (sum_w < 16) sum_w = 16;
-  const uint32_t log_w = floor_log2(sum_w);
+  const uint32_t log_w = static_cast<uint32_t>(floor_log2(sum_w));
   sum_w = 0;
   for (int i = 0; i < 4; ++i) {
     if (log_w >= 4) w[i] >>= log_w - 4;
@@ -63,17 +61,7 @@ int64_t weighted_average(const int64_t pred[4], uint32_t w[4]) {
   return (sum * static_cast<int64_t>(kDiv[sum_w - 1])) >> 24;
 }
 
-int sigma_scale() {
-  static const int scale = [] {
-    const char* env = std::getenv("VPXC_SIGMA_SCALE");
-    return env != nullptr && env[0] != '\0' ? std::atoi(env) : 160;
-  }();
-  return scale;
-}
-
-int sigma_of_mag(int mag) {
-  if (mag < 0) mag = 0;
-  const int target = mag == 0 ? SIGMA_Q8[0] : mag * sigma_scale();
+int sigma_from_q8_target(int64_t target) {
   int best = 0;
   int64_t best_d = std::llabs(static_cast<int64_t>(SIGMA_Q8[0]) - target);
   for (int i = 1; i < NUM_SIGMAS; ++i) {
@@ -103,8 +91,7 @@ struct Walk {
     return plane.at(y, x);
   }
 
-  // Returns the integer prediction and the sigma index. Does not update state.
-  void predict(const Plane& plane, int y, int x, int& guess, int& sigma) {
+  void predict(const Plane& plane, int y, int x, int& guess, int& frac) {
     const int N = sample_at(plane, y - 1, x);
     const int W = sample_at(plane, y, x - 1);
     const int NE = y > 0 ? sample_at(plane, y - 1, std::min(x + 1, width - 1)) : 0;
@@ -117,8 +104,8 @@ struct Walk {
     const int pos_NW = x > 0 ? pos_N - 1 : pos_N;
     uint32_t weights[4];
     for (int i = 0; i < 4; ++i) {
-      const uint64_t acc = static_cast<uint64_t>(perr[i][static_cast<size_t>(pos_N)]) + perr[i][static_cast<size_t>(pos_NE)] +
-                           perr[i][static_cast<size_t>(pos_NW)];
+      const uint64_t acc = static_cast<uint64_t>(perr[i][static_cast<size_t>(pos_N)]) +
+                           perr[i][static_cast<size_t>(pos_NE)] + perr[i][static_cast<size_t>(pos_NW)];
       weights[i] = error_weight(acc, header.w[i]);
     }
     const int64_t n = static_cast<int64_t>(N) << kExtra;
@@ -144,12 +131,12 @@ struct Walk {
       const int64_t mn = std::min(wv, std::min(ne, n));
       pred = std::max(mn, std::min(mx, pred));
     }
-    guess = static_cast<int>((pred + kRound) >> kExtra);
+    const int64_t pred_q4 = pred << 1;
+    const int64_t gi = (pred_q4 + 8) >> 4;
+    guess = static_cast<int>(gi);
+    frac = std::clamp(static_cast<int>(pred_q4 - (gi << 4) + 8), 0, 15);
     const int neighbor = std::max({std::abs(teW), std::abs(teN), std::abs(teNW), std::abs(teNE)}) >> kExtra;
-    // Running absolute error tracks the local scale better than a single neighbor max.
-    const int mag = std::max(neighbor, (run_abs + 2) >> 2);
-    last_mag = mag;
-    sigma = sigma_of_mag(mag);
+    last_mag = std::max(neighbor, (run_abs + 2) >> 2);
     saved_pred = pred;
     for (int i = 0; i < 4; ++i) saved_p[i] = prediction[i];
   }
@@ -174,12 +161,6 @@ struct Walk {
   int last_mag = 0;
 };
 
-struct Coded {
-  int nu = 1;
-  std::vector<int32_t> residual;
-  std::vector<int32_t> sigma;
-};
-
 int log_bucket(int mag, int limit) {
   int bucket = 0;
   while (mag > 1 && bucket < limit) {
@@ -189,250 +170,16 @@ int log_bucket(int mag, int limit) {
   return bucket;
 }
 
-struct Adapt {
-  int count[42]{};
-  int total = 0;
-  double emit(int value) {
-    int mag = value < 0 ? -value : value;
-    int sym = 0;
-    int extra = 0;
-    if (mag <= 20) sym = value < 0 ? mag * 2 - 1 : mag * 2;
-    else {
-      sym = 41;
-      int bits = 0;
-      int m = mag;
-      while (m > 1) {
-        m >>= 1;
-        ++bits;
-      }
-      extra = 1 + bits;
-    }
-    const double p = static_cast<double>(count[sym] + 1) / static_cast<double>(total + 42);
-    count[sym] += 1;
-    total += 1;
-    return -std::log2(p) + extra;
-  }
-};
-
-Coded analyze(const Plane& plane, double* adapt_bits) {
-  Walk walk(plane.width);
-  Coded out;
-  const int n = plane.height * plane.width;
-  out.residual.resize(static_cast<size_t>(n));
-  out.sigma.resize(static_cast<size_t>(n));
-  Adapt fine[8][8];
-  double bits = 0;
-  for (int y = 0; y < plane.height; ++y) {
-    for (int x = 0; x < plane.width; ++x) {
-      int guess = 0;
-      int sigma = 0;
-      walk.predict(plane, y, x, guess, sigma);
-      const int truth = plane.at(y, x);
-      const int err = truth - guess;
-      out.residual[static_cast<size_t>(y * plane.width + x)] = err;
-      out.sigma[static_cast<size_t>(y * plane.width + x)] = sigma;
-      if (adapt_bits) {
-        const int W = x ? plane.at(y, x - 1) : guess;
-        const int N = y ? plane.at(y - 1, x) : guess;
-        const int eb = log_bucket(walk.last_mag, 7);
-        const int gb = log_bucket(std::abs(W - N), 7);
-        bits += fine[eb][gb].emit(err);
-      }
-      walk.update(truth, y, x);
-    }
-  }
-  if (adapt_bits) *adapt_bits += bits;
-  return out;
-}
-
-struct Freq {
-  int count[42]{};
-  int total = 0;
-  void rescale() {
-    if (total < 8192) return;
-    total = 0;
-    for (int& c : count) {
-      c = (c + 1) >> 1;
-      total += c;
-    }
-  }
-  void model(int sym, uint32_t& cum, uint32_t& freq, uint32_t& tot) const {
-    cum = 0;
-    for (int i = 0; i < sym; ++i) cum += static_cast<uint32_t>(count[i] + 1);
-    freq = static_cast<uint32_t>(count[sym] + 1);
-    tot = static_cast<uint32_t>(total + 42);
-  }
-  void seen(int sym) {
-    count[sym] += 1;
-    total += 1;
-    rescale();
-  }
-};
-
-struct ArithEnc {
-  uint32_t low = 0;
-  uint32_t high = 0xffffffffu;
-  std::vector<uint8_t> out;
-  void encode(uint32_t cum, uint32_t freq, uint32_t tot) {
-    const uint64_t span = static_cast<uint64_t>(high) - low + 1;
-    const uint64_t step = span / tot;
-    if (step == 0) throw CodecError("arithmetic range collapsed");
-    const uint32_t new_low = static_cast<uint32_t>(low + step * cum);
-    const uint32_t new_high = static_cast<uint32_t>(low + step * (cum + freq) - 1);
-    low = new_low;
-    high = new_high;
-    renorm();
-  }
-  void renorm() {
-    while (((low ^ high) & 0xff000000u) == 0) {
-      out.push_back(static_cast<uint8_t>(low >> 24));
-      low <<= 8;
-      high = (high << 8) | 0xffu;
-    }
-  }
-  std::vector<uint8_t> finish() {
-    for (int i = 0; i < 4; ++i) {
-      out.push_back(static_cast<uint8_t>(low >> 24));
-      low <<= 8;
-    }
-    return out;
-  }
-};
-
-struct ArithDec {
-  uint32_t low = 0;
-  uint32_t high = 0xffffffffu;
-  uint32_t code = 0;
-  const uint8_t* data = nullptr;
-  size_t size = 0;
-  size_t pos = 0;
-  explicit ArithDec(const uint8_t* bytes, size_t n) : data(bytes), size(n) {
-    for (int i = 0; i < 4; ++i) code = (code << 8) | next();
-  }
-  uint8_t next() { return pos < size ? data[pos++] : 0; }
-  uint32_t target(uint32_t tot) const {
-    const uint64_t span = static_cast<uint64_t>(high) - low + 1;
-    const uint64_t step = span / tot;
-    if (step == 0) throw CodecError("arithmetic range collapsed");
-    return static_cast<uint32_t>((static_cast<uint64_t>(code - low)) / step);
-  }
-  void update(uint32_t cum, uint32_t freq, uint32_t tot) {
-    const uint64_t span = static_cast<uint64_t>(high) - low + 1;
-    const uint64_t step = span / tot;
-    const uint32_t base = low;
-    low = static_cast<uint32_t>(base + step * cum);
-    high = static_cast<uint32_t>(base + step * (static_cast<uint64_t>(cum) + freq) - 1);
-    while (((low ^ high) & 0xff000000u) == 0) {
-      low <<= 8;
-      high = (high << 8) | 0xffu;
-      code = (code << 8) | next();
-    }
-  }
-};
-
-int floor_log2_int(int mag) { return 31 - __builtin_clz(static_cast<unsigned>(mag)); }
-
-void write_escape(ArithEnc& enc, int value) {
-  const int mag = value < 0 ? -value : value;
-  const int bits = floor_log2_int(mag);
-  const int rest = mag - (1 << bits);
-  enc.encode(value < 0 ? 1u : 0u, 1u, 2u);
-  for (int i = bits - 1; i >= 0; --i) enc.encode((rest >> i) & 1, 1u, 2u);
-}
-
-int read_escape(ArithDec& dec, int bits_hint_unused) {
-  (void)bits_hint_unused;
-  const uint32_t sign = dec.target(2);
-  dec.update(sign, 1u, 2u);
-  // The bit length is known from the symbol path: caller passes it.
-  return static_cast<int>(sign);
-}
-
-struct Esc {
-  int sign = 0;
-  int rest = 0;
-  int bits = 0;
-};
-
-Esc split_escape(int value) {
-  const int mag = value < 0 ? -value : value;
-  Esc e;
-  e.sign = value < 0 ? 1 : 0;
-  e.bits = floor_log2_int(mag);
-  e.rest = mag - (1 << e.bits);
-  return e;
-}
-
-void put_symbol(ArithEnc& enc, Freq& freq, int value) {
-  int sym = 0;
-  Esc esc;
-  const int mag = value < 0 ? -value : value;
-  if (mag <= 20) sym = value < 0 ? mag * 2 - 1 : mag * 2;
-  else {
-    sym = 41;
-    esc = split_escape(value);
-  }
-  uint32_t cum = 0, fr = 0, tot = 0;
-  freq.model(sym, cum, fr, tot);
-  enc.encode(cum, fr, tot);
-  freq.seen(sym);
-  if (sym == 41) {
-    enc.encode(static_cast<uint32_t>(esc.sign), 1u, 2u);
-    for (int i = 4; i >= 0; --i) enc.encode(static_cast<uint32_t>((esc.bits >> i) & 1), 1u, 2u);
-    for (int i = esc.bits - 1; i >= 0; --i) enc.encode(static_cast<uint32_t>((esc.rest >> i) & 1), 1u, 2u);
-  }
-}
-
-int get_symbol(ArithDec& dec, Freq& freq) {
-  uint32_t cum0 = 0, fr0 = 0, tot = 0;
-  freq.model(0, cum0, fr0, tot);
-  const uint32_t tgt = dec.target(tot);
-  int sym = 41;
-  uint32_t cum = 0;
-  for (int i = 0; i < 42; ++i) {
-    const uint32_t fr = static_cast<uint32_t>(freq.count[i] + 1);
-    if (tgt < cum + fr) {
-      sym = i;
-      dec.update(cum, fr, tot);
-      break;
-    }
-    cum += fr;
-  }
-  freq.seen(sym);
-  if (sym < 41) return (sym & 1) ? -((sym + 1) >> 1) : (sym >> 1);
-  const uint32_t sign = dec.target(2);
-  dec.update(sign, 1u, 2u);
-  // Bit length is not stored; the symbol only says "escape". Recover mag by reading
-  // a unary-free form: the probe's rate assumed the decoder knows the bit length.
-  // Store the bit length in 5 unary-free bits, enough for |residual| up to 2^31.
-  int bits = 0;
-  for (int i = 4; i >= 0; --i) {
-    const uint32_t bit = dec.target(2);
-    dec.update(bit, 1u, 2u);
-    bits = (bits << 1) | static_cast<int>(bit);
-  }
-  int rest = 0;
-  for (int i = bits - 1; i >= 0; --i) {
-    const uint32_t bit = dec.target(2);
-    dec.update(bit, 1u, 2u);
-    rest = (rest << 1) | static_cast<int>(bit);
-  }
-  const int mag = (1 << bits) + rest;
-  return sign ? -mag : mag;
-}
-
-}  // namespace
-
-int context_pair(const Walk& walk, const Plane& plane, int y, int x, int guess, int& eb, int& gb) {
+void context_pair(const Walk& walk, const Plane& plane, int y, int x, int guess, int& eb, int& gb) {
   const int W = x > 0 ? plane.at(y, x - 1) : guess;
   const int N = y > 0 ? plane.at(y - 1, x) : guess;
   eb = log_bucket(walk.last_mag, 7);
   gb = log_bucket(std::abs(W - N), 7);
-  return 0;
 }
 
 struct Sample {
   int32_t residual = 0;
+  int32_t frac = 8;
   uint8_t ctx = 0;
 };
 
@@ -442,37 +189,45 @@ std::vector<Sample> collect(const Plane& plane) {
   for (int y = 0; y < plane.height; ++y) {
     for (int x = 0; x < plane.width; ++x) {
       int guess = 0;
-      int sigma = 0;
-      walk.predict(plane, y, x, guess, sigma);
+      int frac = 8;
+      walk.predict(plane, y, x, guess, frac);
       int eb = 0;
       int gb = 0;
       context_pair(walk, plane, y, x, guess, eb, gb);
       Sample& sample = samples[static_cast<size_t>(y * plane.width + x)];
       sample.residual = plane.at(y, x) - guess;
+      sample.frac = frac;
       sample.ctx = static_cast<uint8_t>((eb << 3) | gb);
       walk.update(plane.at(y, x), y, x);
-      (void)sigma;
     }
   }
   return samples;
 }
 
 std::array<int, 64> sigma_table(const std::vector<Sample>& samples) {
-  int64_t abs_sum[64]{};
-  int count[64]{};
+  int64_t abs_q4_sum[64]{};
+  int64_t count[64]{};
   for (const Sample& sample : samples) {
     const int ctx = sample.ctx;
-    const int32_t r = sample.residual;
-    abs_sum[ctx] += r < 0 ? -static_cast<int64_t>(r) : r;
+    const int64_t inner = static_cast<int64_t>(sample.residual) * 16 - (static_cast<int64_t>(sample.frac) - 8);
+    abs_q4_sum[ctx] += inner < 0 ? -inner : inner;
     count[ctx] += 1;
   }
   std::array<int, 64> sigma{};
+  int prev = 4;
   for (int ctx = 0; ctx < 64; ++ctx) {
-    const int mag = count[ctx] ? static_cast<int>(abs_sum[ctx] / count[ctx]) : 0;
-    sigma[ctx] = sigma_of_mag(mag);
+    if (count[ctx] == 0) {
+      sigma[ctx] = prev;
+      continue;
+    }
+    const int64_t target_q8 = ((abs_q4_sum[ctx] << 4) * 236) / (count[ctx] * 256) + 20;
+    sigma[ctx] = sigma_from_q8_target(target_q8);
+    prev = sigma[ctx];
   }
   return sigma;
 }
+
+}  // namespace
 
 std::vector<uint8_t> encode_wp(const std::vector<Plane>& planes) {
   if (planes.empty()) throw CodecError("empty weighted-predictor tile");
@@ -483,9 +238,10 @@ std::vector<uint8_t> encode_wp(const std::vector<Plane>& planes) {
     const std::array<int, 64> table = sigma_table(samples);
     std::vector<int32_t> residual(samples.size());
     std::vector<int32_t> sigma(samples.size());
-    std::vector<int32_t> frac(samples.size(), 8);
+    std::vector<int32_t> frac(samples.size());
     for (size_t i = 0; i < samples.size(); ++i) {
       residual[i] = samples[i].residual;
+      frac[i] = samples[i].frac;
       sigma[i] = table[samples[i].ctx];
     }
     int best_nu = 0;
@@ -531,17 +287,16 @@ std::vector<Plane> decode_wp(const uint8_t* data, size_t size, int height, int w
     for (int y = 0; y < height; ++y) {
       for (int x = 0; x < width; ++x) {
         int guess = 0;
-        int sig = 0;
-        walk.predict(plane, y, x, guess, sig);
+        int frac = 8;
+        walk.predict(plane, y, x, guess, frac);
         int eb = 0;
         int gb = 0;
         context_pair(walk, plane, y, x, guess, eb, gb);
-        const int residual = decoder.read(table[(eb << 3) | gb], 8);
+        const int residual = decoder.read(table[(eb << 3) | gb], frac);
         const int64_t truth = static_cast<int64_t>(guess) + residual;
         if (truth < -2147483647 || truth > 2147483647) throw CodecError("weighted predictor overflow");
         plane.at(y, x) = static_cast<int32_t>(truth);
         walk.update(plane.at(y, x), y, x);
-        (void)sig;
       }
     }
     pos += len;
