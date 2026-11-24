@@ -72,7 +72,7 @@ PROFILE_QX_RANS = 4
 PROFILE_PALETTE = 5
 PROFILE_SLGF = 6
 
-PROFILES = ("raw", "raster", "kalman", "qx-rice", "qx-rans", "palette", "slgf", "slgf-zero", "wp", "frontier")
+PROFILES = ("raw", "raster", "kalman", "qx-rice", "qx-rans", "palette", "slgf", "slgf-zero", "wp", "frontier", "fast")
 
 FLAG_SHEAF = 1
 COLOR_FLAG_EXTRA = 1
@@ -110,8 +110,8 @@ def encode(
         raise CodecError("unsupported bitstream version")
     if version == 2 and effort not in (1, 2):
         raise CodecError("version 2 effort must be 1 or 2")
-    if version == 3 and effort not in (1, 2, 3):
-        raise CodecError("effort must be 1, 2, or 3")
+    if version == 3 and effort not in (0, 1, 2, 3):
+        raise CodecError("effort must be 0, 1, 2, or 3")
     height, width, channels = _dims(src)
     color_tr = _select_color(src)
     crc = zlib.crc32(_sample_bytes(src)) & 0xFFFFFFFF
