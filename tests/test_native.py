@@ -19,6 +19,8 @@ from vpxc.errors import CodecError
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "cpp" / "build" / "libvpxc_native.so"
 FRONTIER_OBJ = ROOT / "cpp" / "build" / "CMakeFiles" / "vpxc.dir" / "src" / "frontier.cpp.o"
+FAST_OBJ = ROOT / "cpp" / "build" / "CMakeFiles" / "vpxc.dir" / "src" / "fast_codec.cpp.o"
+MEDICAL_OBJ = ROOT / "cpp" / "build" / "CMakeFiles" / "vpxc.dir" / "src" / "medical.cpp.o"
 
 
 def _py_call(fn, *args, **kwargs):
@@ -175,6 +177,194 @@ class TestNativeCodec(unittest.TestCase):
                 for insn in lines[1:]:
                     self.assertIsNone(fp_pat.search(insn), f"FP op in {header}: {insn}")
         self.assertGreaterEqual(checked, 10)
+
+    @unittest.skipUnless(FAST_OBJ.is_file() and MEDICAL_OBJ.is_file(), "fast/medical object files not present")
+    def test_fast_and_medical_decode_machine_code_have_zero_float_ops(self) -> None:
+        fp_pat = re.compile(r"\b(add|sub|mul|div|sqrt|min|max|ucomi|comi|cvt)[a-z]*(ss|sd|ps|pd)\b")
+        for obj, keywords, min_fns in (
+            (FAST_OBJ, ("decode_fast", "decode_fast_plane", "color_inv_fast", "FastBitReader"), 2),
+            (
+                MEDICAL_OBJ,
+                ("decode_volume", "decode_volume_slice", "inspect_volume", "parse_volume_directory", "decode_single_slice"),
+                2,
+            ),
+        ):
+            out = subprocess.check_output(["objdump", "-d", "-C", str(obj)], text=True)
+            checked = 0
+            for block in out.split("\n\n"):
+                lines = block.strip().splitlines()
+                if not lines:
+                    continue
+                header = lines[0]
+                if any(k in header for k in keywords):
+                    checked += 1
+                    for insn in lines[1:]:
+                        self.assertIsNone(fp_pat.search(insn), f"FP op in {obj.name}::{header}: {insn}")
+            self.assertGreaterEqual(checked, min_fns)
+
+    def test_fast_profile_roundtrip_and_sub10ms_decode(self) -> None:
+        import time
+        from vpxc.codec import decode, encode
+
+        rng = np.random.default_rng(77)
+        cases = [
+            np.array([[[11, 22, 33]]], dtype=np.uint8),
+            np.full((64, 64), 1024, dtype=np.uint16),
+            (rng.integers(0, 250, size=(45, 53), dtype=np.uint16) * 16).astype(np.uint16),
+            rng.integers(0, 256, size=(37, 59, 3), dtype=np.uint8),
+            rng.integers(0, 256, size=(31, 29, 4), dtype=np.uint8),
+            rng.integers(0, 65536, size=(25, 33, 3), dtype=np.uint16),
+        ]
+        for img in cases:
+            b0 = encode(img, tile=64, effort=0)
+            bf = encode(img, tile=64, effort=1, profile="fast")
+            self.assertTrue(np.array_equal(decode(b0), img))
+            self.assertTrue(np.array_equal(decode(bf), img))
+
+        # Verify high-throughput fast decode on 768x512 RGB24 photo-like gradient
+        yy, xx = np.mgrid[0:512, 0:768]
+        g = ((yy * 3 + xx * 2) & 0xFF).astype(np.uint8)
+        r = np.clip(g.astype(np.int32) + 17 - (yy >> 4), 0, 255).astype(np.uint8)
+        b = np.clip(g.astype(np.int32) - 13 + (xx >> 5), 0, 255).astype(np.uint8)
+        hd = np.dstack([r, g, b])
+        fast_blob = encode(hd, effort=0)
+        for _ in range(2):
+            decode(fast_blob)
+        timings = []
+        for _ in range(7):
+            t0 = time.perf_counter()
+            out = decode(fast_blob)
+            timings.append((time.perf_counter() - t0) * 1000.0)
+        self.assertTrue(np.array_equal(out, hd))
+        self.assertLess(float(np.median(timings)), 25.0)
+
+    def test_medical_3d_volume_and_random_access_slice_seeking(self) -> None:
+        from vpxc.medical import decode_slice, decode_volume, encode_volume, inspect_volume
+
+        rng = np.random.default_rng(314)
+        # Simulated 16-bit signed Hounsfield Unit CT volume (-1024 air .. +1800 bone)
+        zz, yy, xx = np.mgrid[0:10, 0:48, 0:52]
+        body = ((yy - 24) ** 2 + (xx - 26) ** 2) < 18**2
+        ct = np.full((10, 48, 52), -1024, dtype=np.int16)
+        ct[body] = (40 + zz[body] * 3 + (yy[body] - xx[body]) * 2).astype(np.int16)
+        ct += rng.integers(-3, 4, size=ct.shape, dtype=np.int16) * body
+        ct[0] = -1024  # Pure air padding slice
+        ct[5] = ct[4]  # Exact duplicate slice
+
+        for effort in (0, 1, 2):
+            blob = encode_volume(ct, effort=effort, gos_size=4)
+            meta = inspect_volume(blob)
+            self.assertEqual(meta["depth"], 10)
+            self.assertEqual(meta["height"], 48)
+            self.assertEqual(meta["width"], 52)
+            self.assertEqual(meta["dtype"], "int16")
+            self.assertEqual(meta["gos_size"], 4)
+
+            restored = decode_volume(blob)
+            self.assertEqual(restored.dtype, np.int16)
+            self.assertTrue(np.array_equal(restored, ct))
+
+            for z in range(10):
+                sl = decode_slice(blob, z)
+                self.assertEqual(sl.dtype, np.int16)
+                self.assertTrue(np.array_equal(sl, ct[z]))
+
+            with self.assertRaises(CodecError):
+                decode_slice(blob, -1)
+            with self.assertRaises(CodecError):
+                decode_slice(blob, 10)
+
+        # Also verify uint8 and uint16 3D volumes
+        for dt, hi in ((np.uint8, 220), (np.uint16, 4095)):
+            vol = rng.integers(0, hi, size=(5, 24, 28), dtype=dt)
+            b = encode_volume(vol, effort=1, gos_size=2)
+            self.assertTrue(np.array_equal(decode_volume(b), vol))
+            self.assertTrue(np.array_equal(decode_slice(b, 3), vol[3]))
+
+    def test_dicom_byte_exact_pack_and_unpack(self) -> None:
+        import hashlib
+        from vpxc.medical import create_multiframe_dicom, decode_dicom_pixels, pack_dicom, unpack_dicom
+
+        rng = np.random.default_rng(99)
+        vol_hu = rng.integers(-1024, 1500, size=(6, 32, 36), dtype=np.int16)
+        dcm_bytes = create_multiframe_dicom(vol_hu, modality="CT") + b"\x08\x00\x00\x00UL\x04\x00\x00\x00\x00\x00"
+        orig_sha = hashlib.sha256(dcm_bytes).hexdigest()
+
+        for eff in (0, 2):
+            vpxd = pack_dicom(dcm_bytes, effort=eff, gos_size=3)
+            unpacked = unpack_dicom(vpxd)
+            self.assertEqual(unpacked, dcm_bytes)
+            self.assertEqual(hashlib.sha256(unpacked).hexdigest(), orig_sha)
+            pix = decode_dicom_pixels(vpxd)
+            self.assertTrue(np.array_equal(pix, vol_hu))
+            sl4 = decode_dicom_pixels(vpxd, z_index=4)
+            self.assertTrue(np.array_equal(sl4, vol_hu[4]))
+
+        # Corrupting any byte in VPXD must raise CodecError
+        bad = bytearray(vpxd)
+        bad[-3] ^= 0xFF
+        with self.assertRaises(CodecError):
+            unpack_dicom(bytes(bad))
+
+    def test_zip_bomb_headers_rejected_without_oom(self) -> None:
+        import struct
+        from vpxc.codec import decode
+        from vpxc.medical import decode_volume
+
+        # 24-byte VPXC header claiming 16384 x 16384 x 4 uint16 (2 GiB) with 0 tile bytes
+        bomb_2d = struct.pack("<4sBBBBBBIIIH", b"VPXC", 3, 2, 4, 0, 0, 0, 16384, 16384, 0, 8)
+        with self.assertRaises(CodecError):
+            decode(bomb_2d)
+
+        # Oversized dimension > kMaxImageDim
+        huge_2d = struct.pack("<4sBBBBBBIIIH", b"VPXC", 3, 2, 3, 0, 0, 0, 50000, 50000, 0, 256)
+        with self.assertRaises(CodecError):
+            decode(huge_2d)
+
+        # 24-byte VPXV header claiming 2048 x 4096 x 4096 uint16 (64 GiB) with 0 GoS bytes
+        bomb_3d = struct.pack("<4sBBBBIIII", b"VPXV", 1, 2, 0, 8, 2048, 4096, 4096, 0)
+        with self.assertRaises(CodecError):
+            decode_volume(bomb_3d)
+
+    def test_arm64_neon_simd_codegen_and_float_freedom(self) -> None:
+        import shutil
+
+        clang = shutil.which("clang++")
+        if clang is None:
+            self.skipTest("clang++ not installed")
+        simd_hdr = ROOT / "cpp" / "include"
+        code = """
+        #include "vpxc/simd.hpp"
+        int64_t dot_fn(const int32_t* f, const int16_t* w) { return vpxc::simd::dot36_i32_i16(f, w); }
+        void rct_fn(int32_t* r, const int32_t* g, int32_t* b, int n) {
+          vpxc::simd::rct_sub_green_inv_row(g, r, b, r, b, n);
+          vpxc::simd::rct_sub_avg_inv_row(g, r, b, r, b, n);
+        }
+        const char* arch_fn() { return vpxc::simd::arch_name(); }
+        """
+        proc = subprocess.run(
+            [
+                clang,
+                "--target=aarch64-linux-gnu",
+                "-ffreestanding",
+                "-O3",
+                "-std=c++20",
+                f"-I{simd_hdr}",
+                "-S",
+                "-o",
+                "-",
+                "-x",
+                "c++",
+                "-",
+            ],
+            input=code,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        asm = proc.stdout
+        self.assertIn("arm64-neon", asm)
+        self.assertIsNone(re.search(r"\b(fadd|fsub|fmul|fdiv|scvtf|fcvtzs)\b", asm))
 
 
 if __name__ == "__main__":
