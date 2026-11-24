@@ -46,8 +46,8 @@ struct Image {
 };
 
 struct EncodeOptions {
-  int tile = 768;
-  int effort = 2;
+  int tile = 384;
+  int effort = 1;
   int version = 3;
   // Empty means automatic profile selection.
   const char* profile = nullptr;
