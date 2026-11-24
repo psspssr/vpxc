@@ -3,10 +3,14 @@
 #include "vpxc/wp.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <exception>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <zlib.h>
@@ -453,6 +457,38 @@ std::optional<std::vector<uint8_t>> palette_record(const Image& image, int y0, i
   const int channels = image.channels;
   const int pixels = height * width;
   if (pixels <= 0) return std::nullopt;
+
+  // Fast stack-allocated open-addressed pre-screen: abort in O(<=513) steps on natural images!
+  if (pixels > kMaxPalette && channels <= 4) {
+    constexpr uint32_t kHashSize = 2048;
+    constexpr uint32_t kHashMask = kHashSize - 1;
+    uint64_t hkeys[kHashSize];
+    uint8_t hused[kHashSize]{};
+    int fast_uniq = 0;
+    const uint16_t mask_v = image.u16 ? 0xffffu : 0x00ffu;
+    for (int y = 0; y < height; ++y) {
+      const size_t row_off = static_cast<size_t>(y0 + y) * static_cast<size_t>(image.width) + static_cast<size_t>(x0);
+      for (int x = 0; x < width; ++x) {
+        const size_t base = (row_off + static_cast<size_t>(x)) * static_cast<size_t>(channels);
+        uint64_t packed = static_cast<uint64_t>(image.samples[base] & mask_v);
+        if (channels >= 3) {
+          packed |= static_cast<uint64_t>(image.samples[base + 1] & mask_v) << 16;
+          packed |= static_cast<uint64_t>(image.samples[base + 2] & mask_v) << 32;
+          if (channels == 4) packed |= static_cast<uint64_t>(image.samples[base + 3] & mask_v) << 48;
+        }
+        uint32_t slot = static_cast<uint32_t>((packed * 11400714819323198485ull) >> 53) & kHashMask;
+        while (hused[slot]) {
+          if (hkeys[slot] == packed) goto next_pix;
+          slot = (slot + 1u) & kHashMask;
+        }
+        hused[slot] = 1;
+        hkeys[slot] = packed;
+        if (++fast_uniq > kMaxPalette) return std::nullopt;
+      next_pix:;
+      }
+    }
+  }
+
   const int bpp = (image.u16 ? 2 : 1) * channels;
   std::vector<uint8_t> keys(static_cast<size_t>(pixels) * static_cast<size_t>(bpp));
   std::vector<uint16_t> samples(static_cast<size_t>(pixels) * static_cast<size_t>(channels));
@@ -561,7 +597,7 @@ bool needs_legacy_planes(const Image& image, const EncodeOptions& opt) {
     for (int x0 = 0; x0 < image.width; x0 += opt.tile) {
       const int th = std::min(image.height, y0 + opt.tile) - y0;
       const int tw = std::min(image.width, x0 + opt.tile) - x0;
-      if (static_cast<int64_t>(th) * tw <= 65536) return true;
+      if (static_cast<int64_t>(th) * tw <= 4096) return true;
     }
   }
   return false;
@@ -606,19 +642,23 @@ std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int
     throw CodecError(std::string("unknown profile ") + profile);
   }
   std::vector<std::vector<uint8_t>> candidates;
-  candidates.push_back(raw_record(image, y0, y1, x0, x1));
   if (version >= 3) {
     candidates.push_back(frontier_record(image, y0, y1, x0, x1, effort));
   }
   if (auto palette = palette_record(image, y0, y1, x0, x1, effort)) candidates.push_back(std::move(*palette));
-  if (version <= 2 || area <= 65536) {
+  if (version <= 2 || area <= 4096) {
     const std::vector<Plane> planes = apply_color_forward(split_region(image, y0, y1, x0, x1), transform);
     candidates.push_back(slgf_record(planes, effort, version, halos, true));
     if ((effort >= 2 || std::min(height, width) < 32) && area <= 65536) {
       candidates.push_back(raster_record(planes, true));
     }
   }
-  return shortest(std::move(candidates));
+  const size_t raw_size =
+      1u + static_cast<size_t>(area) * static_cast<size_t>(image.channels) * static_cast<size_t>(image.u16 ? 2 : 1);
+  if (candidates.empty()) return raw_record(image, y0, y1, x0, x1);
+  auto best = shortest(std::move(candidates));
+  if (best.size() >= raw_size) return raw_record(image, y0, y1, x0, x1);
+  return best;
 }
 
 std::vector<Plane> decode_raster_planes(std::span<const uint8_t> payload, int height, int width, int channels, bool kalman) {
@@ -770,17 +810,56 @@ std::vector<uint8_t> encode_image(const Image& image, const EncodeOptions& opt) 
   if (opt.version == 3 && use_legacy_planes) {
     lifted = apply_color_forward(split_region(image, 0, image.height, 0, image.width), transform);
   }
+  struct TileJob {
+    int y0, y1, x0, x1;
+  };
+  std::vector<TileJob> jobs;
   for (int y0 = 0; y0 < image.height; y0 += opt.tile) {
     for (int x0 = 0; x0 < image.width; x0 += opt.tile) {
-      const int y1 = std::min(image.height, y0 + opt.tile);
-      const int x1 = std::min(image.width, x0 + opt.tile);
+      jobs.push_back(TileJob{y0, std::min(image.height, y0 + opt.tile), x0, std::min(image.width, x0 + opt.tile)});
+    }
+  }
+
+  const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
+  if (lifted.empty() && jobs.size() >= 2 && hw_threads >= 2) {
+    std::vector<std::vector<uint8_t>> tile_blobs(jobs.size());
+    std::atomic<size_t> next_idx{0};
+    std::mutex err_mu;
+    std::exception_ptr first_err;
+    const size_t n_workers = std::min<size_t>(jobs.size(), hw_threads);
+    std::vector<std::thread> workers;
+    workers.reserve(n_workers - 1);
+    auto worker_fn = [&]() {
+      while (true) {
+        const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+        if (idx >= jobs.size()) break;
+        try {
+          const auto& j = jobs[idx];
+          tile_blobs[idx] =
+              encode_tile(image, j.y0, j.y1, j.x0, j.x1, transform, opt.effort, opt.profile, opt.version, nullptr);
+        } catch (...) {
+          std::lock_guard<std::mutex> lk(err_mu);
+          if (!first_err) first_err = std::current_exception();
+          next_idx.store(jobs.size(), std::memory_order_relaxed);
+          break;
+        }
+      }
+    };
+    for (size_t w = 0; w + 1 < n_workers; ++w) workers.emplace_back(worker_fn);
+    worker_fn();
+    for (auto& t : workers) t.join();
+    if (first_err) std::rethrow_exception(first_err);
+    for (const auto& tb : tile_blobs) append_bytes(out, tb.data(), tb.size());
+  } else {
+    for (const auto& j : jobs) {
       std::vector<Halo> halos;
       const std::vector<Halo>* halo_ptr = nullptr;
       if (opt.version == 3 && !lifted.empty()) {
-        halos = make_halos(lifted, y0, x0, y1, x1);
+        halos = make_halos(lifted, j.y0, j.x0, j.y1, j.x1);
         halo_ptr = &halos;
       }
-      const auto tile = encode_tile(image, y0, y1, x0, x1, transform, opt.effort, opt.profile, opt.version, halo_ptr);
+      const auto tile =
+          encode_tile(image, j.y0, j.y1, j.x0, j.x1, transform, opt.effort, opt.profile, opt.version, halo_ptr);
       append_bytes(out, tile.data(), tile.size());
     }
   }
@@ -849,6 +928,13 @@ Image decode_image(const uint8_t* data, size_t size) {
   out.channels = channels;
   out.u16 = bps == 2;
   out.samples.assign(static_cast<size_t>(height) * static_cast<size_t>(width) * static_cast<size_t>(channels), 0);
+  struct ParsedTile {
+    int y0, y1, x0, x1, th, tw;
+    int prof, flags, nlevels;
+    std::span<const uint8_t> payload;
+  };
+  std::vector<ParsedTile> ptiles;
+  bool any_halo_slgf = false;
   for (int y0 = 0; y0 < height; y0 += tile) {
     for (int x0 = 0; x0 < width; x0 += tile) {
       const int y1 = std::min(height, y0 + tile);
@@ -858,9 +944,10 @@ Image decode_image(const uint8_t* data, size_t size) {
       if (reader.pos >= reader.size) throw CodecError("truncated tile");
       const int prof = reader.u8("truncated tile");
       if (prof == kProfileRaw) {
-        const size_t nbytes = static_cast<size_t>(th) * static_cast<size_t>(tw) * static_cast<size_t>(channels) * (bps == 1 ? 1 : 2);
+        const size_t nbytes =
+            static_cast<size_t>(th) * static_cast<size_t>(tw) * static_cast<size_t>(channels) * (bps == 1 ? 1 : 2);
         const auto raw = reader.take(nbytes, "truncated raw tile");
-        store_bytes(out, y0, y1, x0, x1, raw.data(), raw.size());
+        ptiles.push_back(ParsedTile{y0, y1, x0, x1, th, tw, prof, 0, 0, raw});
         continue;
       }
       if (reader.pos + 6 > reader.size) throw CodecError("truncated tile header");
@@ -868,38 +955,79 @@ Image decode_image(const uint8_t* data, size_t size) {
       const int nlevels = reader.u8("truncated tile header");
       const uint32_t length = reader.u32("truncated tile header");
       const auto payload = reader.take(length, "truncated tile payload");
-      if (prof == kProfileSlgf) {
-        std::vector<Plane> planes;
-        if (version >= 3 && !payload.empty() && (payload[0] & 0x80)) {
-          std::vector<uint8_t> modern(payload.begin(), payload.end());
-          modern[0] = static_cast<uint8_t>(modern[0] & 0x7f);
-          const std::vector<Halo> halos = halos_from_decoded(out, y0, x0, y1, x1, transform);
-          planes = decode_slgf_v3(modern.data(), modern.size(), th, tw, channels, &halos);
-        } else {
-          planes = decode_slgf_tile(payload.data(), payload.size(), th, tw, channels);
-        }
-        store_planes(out, y0, x0, apply_color_inverse(planes, transform));
-      } else if (prof == kProfileRaster || prof == kProfileKalman) {
-        auto planes = decode_raster_planes(payload, th, tw, channels, prof == kProfileKalman);
-        store_planes(out, y0, x0, apply_color_inverse(planes, transform));
-      } else if (prof == kProfileQxRice || prof == kProfileQxRans) {
-        auto planes = decode_qx_planes(payload, th, tw, channels, nlevels, (flags & kFlagSheaf) != 0, prof == kProfileQxRans);
-        store_planes(out, y0, x0, apply_color_inverse(planes, transform));
-      } else if (prof == kProfileWp) {
-        auto planes = decode_wp(payload.data(), payload.size(), th, tw, channels);
-        store_planes(out, y0, x0, apply_color_inverse(planes, transform));
-      } else if (prof == kProfileFrontier) {
-        if (version <= 2) throw CodecError("frontier tile requires bitstream version 3");
-        auto planes = decode_frontier(payload.data(), payload.size(), th, tw, channels, bps == 2);
-        store_planes(out, y0, x0, planes);
-      } else if (prof == kProfilePalette) {
-        decode_palette(out, y0, x0, payload, th, tw, flags);
-      } else {
-        throw CodecError("unknown tile profile " + std::to_string(prof));
+      if (prof == kProfileSlgf && version >= 3 && !payload.empty() && (payload[0] & 0x80)) {
+        any_halo_slgf = true;
       }
+      ptiles.push_back(ParsedTile{y0, y1, x0, x1, th, tw, prof, flags, nlevels, payload});
     }
   }
   if (reader.pos != reader.size) throw CodecError("trailing bytes after the last tile");
+
+  auto decode_one_tile = [&](const ParsedTile& t) {
+    if (t.prof == kProfileRaw) {
+      store_bytes(out, t.y0, t.y1, t.x0, t.x1, t.payload.data(), t.payload.size());
+    } else if (t.prof == kProfileSlgf) {
+      std::vector<Plane> planes;
+      if (version >= 3 && !t.payload.empty() && (t.payload[0] & 0x80)) {
+        std::vector<uint8_t> modern(t.payload.begin(), t.payload.end());
+        modern[0] = static_cast<uint8_t>(modern[0] & 0x7f);
+        const std::vector<Halo> halos = halos_from_decoded(out, t.y0, t.x0, t.y1, t.x1, transform);
+        planes = decode_slgf_v3(modern.data(), modern.size(), t.th, t.tw, channels, &halos);
+      } else {
+        planes = decode_slgf_tile(t.payload.data(), t.payload.size(), t.th, t.tw, channels);
+      }
+      store_planes(out, t.y0, t.x0, apply_color_inverse(planes, transform));
+    } else if (t.prof == kProfileRaster || t.prof == kProfileKalman) {
+      auto planes = decode_raster_planes(t.payload, t.th, t.tw, channels, t.prof == kProfileKalman);
+      store_planes(out, t.y0, t.x0, apply_color_inverse(planes, transform));
+    } else if (t.prof == kProfileQxRice || t.prof == kProfileQxRans) {
+      auto planes =
+          decode_qx_planes(t.payload, t.th, t.tw, channels, t.nlevels, (t.flags & kFlagSheaf) != 0, t.prof == kProfileQxRans);
+      store_planes(out, t.y0, t.x0, apply_color_inverse(planes, transform));
+    } else if (t.prof == kProfileWp) {
+      auto planes = decode_wp(t.payload.data(), t.payload.size(), t.th, t.tw, channels);
+      store_planes(out, t.y0, t.x0, apply_color_inverse(planes, transform));
+    } else if (t.prof == kProfileFrontier) {
+      if (version <= 2) throw CodecError("frontier tile requires bitstream version 3");
+      if (t.flags != 0 || t.nlevels != 0) throw CodecError("invalid frontier tile header");
+      auto planes = decode_frontier(t.payload.data(), t.payload.size(), t.th, t.tw, channels, bps == 2);
+      store_planes(out, t.y0, t.x0, planes);
+    } else if (t.prof == kProfilePalette) {
+      decode_palette(out, t.y0, t.x0, t.payload, t.th, t.tw, t.flags);
+    } else {
+      throw CodecError("unknown tile profile " + std::to_string(t.prof));
+    }
+  };
+
+  const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
+  if (!any_halo_slgf && ptiles.size() >= 2 && hw_threads >= 2) {
+    std::atomic<size_t> next_idx{0};
+    std::mutex err_mu;
+    std::exception_ptr first_err;
+    const size_t n_workers = std::min<size_t>(ptiles.size(), hw_threads);
+    std::vector<std::thread> workers;
+    workers.reserve(n_workers - 1);
+    auto worker_fn = [&]() {
+      while (true) {
+        const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+        if (idx >= ptiles.size()) break;
+        try {
+          decode_one_tile(ptiles[idx]);
+        } catch (...) {
+          std::lock_guard<std::mutex> lk(err_mu);
+          if (!first_err) first_err = std::current_exception();
+          next_idx.store(ptiles.size(), std::memory_order_relaxed);
+          break;
+        }
+      }
+    };
+    for (size_t w = 0; w + 1 < n_workers; ++w) workers.emplace_back(worker_fn);
+    worker_fn();
+    for (auto& th : workers) th.join();
+    if (first_err) std::rethrow_exception(first_err);
+  } else {
+    for (const auto& t : ptiles) decode_one_tile(t);
+  }
   const std::vector<uint8_t> got_bytes = image_bytes(out);
   if (crc32_bytes(got_bytes.data(), got_bytes.size()) != crc) throw CodecError("CRC mismatch");
   return out;
