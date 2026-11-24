@@ -17,20 +17,6 @@ int unzigzag(int symbol) {
   return symbol >> 1;
 }
 
-void BitWriter::write_bits(uint32_t value, int width) {
-  if (width < 0) throw CodecError("negative bit width");
-  if (width == 0) return;
-  const uint32_t mask = width == 32 ? 0xffffffffu : ((1u << width) - 1u);
-  buf_ = (buf_ << width) | (value & mask);
-  n_ += width;
-  while (n_ >= 8) {
-    n_ -= 8;
-    out_.push_back(static_cast<uint8_t>((buf_ >> n_) & 0xff));
-    if (n_) buf_ &= (1ull << n_) - 1ull;
-    else buf_ = 0;
-  }
-}
-
 void BitWriter::write_exp_golomb(uint32_t value) {
   const uint32_t code = value + 1;
   int zeros = 0;
@@ -62,23 +48,6 @@ std::vector<uint8_t> BitWriter::finish() {
     buf_ = 0;
   }
   return out_;
-}
-
-BitReader::BitReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
-
-uint32_t BitReader::read_bits(int width) {
-  if (width < 0) throw CodecError("negative bit width");
-  if (width == 0) return 0;
-  while (n_ < width) {
-    if (pos_ >= size_) throw CodecError("truncated bitstream");
-    buf_ = (buf_ << 8) | data_[pos_++];
-    n_ += 8;
-  }
-  n_ -= width;
-  const uint32_t value = static_cast<uint32_t>((buf_ >> n_) & ((width == 32) ? 0xffffffffu : ((1u << width) - 1u)));
-  if (n_) buf_ &= (1ull << n_) - 1ull;
-  else buf_ = 0;
-  return value;
 }
 
 uint32_t BitReader::read_exp_golomb() {
@@ -114,6 +83,10 @@ int BitReader::read_rice(int k) {
   }
   if (read_bits(1) != 0) throw CodecError("bad rice escape");
   return static_cast<int>(read_exp_golomb());
+}
+
+void BitReader::check_zero_tail() const {
+  if (pos_ != size_ || buf_ != 0) throw CodecError("non-zero or trailing bits in bitstream");
 }
 
 }  // namespace vpxc
