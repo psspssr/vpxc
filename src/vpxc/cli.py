@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 import time
 
 import numpy as np
 
+from vpxc import __version__
 from vpxc.benchmark import CodecResult, benchmark_image, format_benchmark_table
 from vpxc.codec import PROFILES, TILE, decode, encode
-from vpxc.medical import decode_slice, decode_volume, encode_volume, pack_dicom, unpack_dicom
+from vpxc.medical import decode_slice, decode_volume, encode_volume, inspect_volume, pack_dicom, unpack_dicom
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="vpxc",
-        description="vpxc — exact lossless SLGF image compressor and benchmark tool.",
+        description="vpxc — deterministic lossless image, 3D medical volume, and DICOM codec.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     enc = sub.add_parser("encode", help="compress an image to a .vpxc file")
@@ -61,6 +64,20 @@ def main(argv: list[str] | None = None) -> None:
     upkd = sub.add_parser("unpack-dicom", help="restore a SHA-256 byte-exact .dcm file from .vpxd")
     upkd.add_argument("input", help="input .vpxd archive path")
     upkd.add_argument("output", help="output restored .dcm path")
+
+    encv = sub.add_parser("encode-volume", help="compress a 3D .npy volume (uint8/uint16/int16) to .vpxv")
+    encv.add_argument("input", help="input 3D .npy path (Z, H, W)")
+    encv.add_argument("output", help="output .vpxv path")
+    encv.add_argument("--effort", type=int, default=1, choices=(0, 1, 2, 3))
+    encv.add_argument("--gos", type=int, default=8, help="Group-of-Slices interval (default: 8)")
+
+    decv = sub.add_parser("decode-volume", help="decode a .vpxv volume (or single Z slice) to .npy")
+    decv.add_argument("input", help="input .vpxv path")
+    decv.add_argument("output", help="output .npy path")
+    decv.add_argument("--slice", dest="z_slice", type=int, default=None, help="decode only a single 0-indexed Z slice")
+
+    inspv = sub.add_parser("inspect-volume", help="print VPXV 3D volume metadata as JSON")
+    inspv.add_argument("input", help="input .vpxv path")
 
     args = parser.parse_args(argv)
     if args.cmd == "encode":
@@ -122,6 +139,27 @@ def main(argv: list[str] | None = None) -> None:
         elapsed = time.perf_counter() - started
         Path(args.output).write_bytes(dcm)
         print(f"unpacked {args.input} -> {args.output} ({len(dcm):,} B, SHA-256 verified) in {elapsed:.3f}s")
+    elif args.cmd == "encode-volume":
+        vol = np.load(args.input)
+        started = time.perf_counter()
+        blob = encode_volume(vol, effort=args.effort, gos_size=args.gos)
+        elapsed = time.perf_counter() - started
+        Path(args.output).write_bytes(blob)
+        bpv = 8.0 * len(blob) / max(1, vol.size)
+        ratio = vol.nbytes / max(1, len(blob))
+        print(
+            f"wrote {args.output}: {len(blob):,} B ({bpv:.4f} bpv, {ratio:.2f}x) in {elapsed:.3f}s"
+        )
+    elif args.cmd == "decode-volume":
+        blob = Path(args.input).read_bytes()
+        started = time.perf_counter()
+        arr = decode_volume(blob) if args.z_slice is None else decode_slice(blob, args.z_slice)
+        elapsed = time.perf_counter() - started
+        np.save(args.output, arr)
+        print(f"wrote {args.output}: shape={arr.shape} dtype={arr.dtype} in {elapsed:.3f}s")
+    elif args.cmd == "inspect-volume":
+        meta = inspect_volume(Path(args.input).read_bytes())
+        print(json.dumps(meta, indent=2))
     else:
         paths = _collect_images(args.inputs)
         if not paths:

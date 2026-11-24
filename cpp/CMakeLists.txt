@@ -38,8 +38,9 @@ add_library(vpxc STATIC
   src/codec.cpp
 )
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 target_include_directories(vpxc PUBLIC include)
-target_link_libraries(vpxc PUBLIC z Threads::Threads)
+target_link_libraries(vpxc PUBLIC ZLIB::ZLIB Threads::Threads)
 target_compile_options(vpxc PRIVATE -Wall -Wextra)
 if(VPXC_NATIVE_ARCH AND COMPILER_SUPPORTS_MARCH_NATIVE)
   target_compile_options(vpxc PUBLIC -march=native)

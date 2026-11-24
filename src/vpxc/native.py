@@ -24,11 +24,16 @@ def _candidate_paths() -> list[Path]:
     if env:
         paths.append(Path(env))
     root = Path(__file__).resolve().parents[2]
+    pkg = Path(__file__).resolve().parent
     paths.extend(
         [
             root / "cpp" / "build" / "libvpxc_native.so",
             root / "cpp" / "build" / "libvpxc_native.dylib",
-            Path(__file__).resolve().parent / "libvpxc_native.so",
+            root / "cpp" / "build" / "vpxc_native.dll",
+            root / "cpp" / "build" / "Release" / "vpxc_native.dll",
+            pkg / "libvpxc_native.so",
+            pkg / "libvpxc_native.dylib",
+            pkg / "vpxc_native.dll",
         ]
     )
     return paths

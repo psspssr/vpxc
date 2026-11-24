@@ -1,5 +1,10 @@
 # `vpxc` — Deterministic Lossless Medical & Photographic Image Compression
 
+[![CI](https://github.com/psspssr/vpxc/actions/workflows/ci.yml/badge.svg)](https://github.com/psspssr/vpxc/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](./cpp)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](./pyproject.toml)
+
 `vpxc` is an open-source **lossless image and 3D clinical volume codec** (native C++20 engine with portable `x86_64 AVX2` & `ARM64 NEON` integer SIMD, Python bindings, and CLI) for **12/16-bit signed/unsigned 3D CT & MRI stacks (`VPXV`)**, **byte-exact DICOM Part 10 archives (`VPXD`)**, and 8-bit/16-bit grayscale, RGB, and RGBA images (`.vpxc`).
 
 Most lossless codecs force an infrastructure compromise: fast codecs leave 15–35% of storage on the table (`JPEG 2000` / `HTJ2K`, `JPEG-LS`, `PNG`), stream compressors destroy random slice access (`.nii.gz`), and high-ratio codecs require multi-second CPU encoding (`JPEG XL -e 9`) or non-deterministic GPUs. **`vpxc` closes all three gaps on pure CPU:**
@@ -200,6 +205,11 @@ When `cpp/build/libvpxc_native.so` is present, `vpxc` automatically dispatches t
 vpxc pack-dicom scan.dcm scan.vpxd --effort 1 --gos 8
 vpxc unpack-dicom scan.vpxd restored_scan.dcm
 
+# Compress, inspect, or seek a single axial slice from a 3D CT/MRI volume (.npy <-> .vpxv):
+vpxc encode-volume ct_hu.npy ct_hu.vpxv --effort 1 --gos 8
+vpxc inspect-volume ct_hu.vpxv
+vpxc decode-volume ct_hu.vpxv slice_73.npy --slice 73
+
 # Real-time ultra-fast 2D encode & decode (< 8 ms on 768x512 RGB24, effort 0):
 vpxc encode photo.png photo_fast.vpxc --effort 0
 
@@ -296,9 +306,13 @@ cmake --build cpp/build-fuzz --target vpxc_fuzz_decode -j
 
 ---
 
-## Technical Documentation & Research Notes
+## Technical Documentation
 
+- [`docs/architecture.md`](./docs/architecture.md) — C++20 native engine design, causal probabilistic predictors, `AVX2`/`ARM64 NEON` SIMD kernels, 4-way LUT `rANS`, `VPXV`/`VPXD` 3D medical layout, and zero-float / fuzzing invariants.
 - [`training/`](./training/) — Leak-checked corpus builder (`prepare_corpora.py`) and 8-fold cross-validated offline prior trainer (`train_frontier.cpp`).
-- [`docs/vpxc-slgf-specification.pdf`](./docs/vpxc-slgf-specification.pdf) — Mathematical specification, bijectivity proofs, and normative integer equations (`LaTeX` source in [`paper/`](./paper/)).
-- [`docs/frontier-lossless-image-compression.md`](./docs/frontier-lossless-image-compression.md) — Architecture monograph and experimental roadmap.
-- [`docs/slgf-improvement-plan.md`](./docs/slgf-improvement-plan.md) — Subband telemetry and engineering notes.
+
+---
+
+## License
+
+Released under the [MIT License](./LICENSE).

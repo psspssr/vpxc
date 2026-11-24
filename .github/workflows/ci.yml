@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: C++20 & Python Suite (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            label: x86_64-avx2
+          - runner: ubuntu-24.04-arm
+            label: arm64-neon
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build C++20 native engine
+        run: |
+          cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build cpp/build -j
+
+      - name: Install Python package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[images]"
+
+      - name: Run full unit & native conformance suite
+        run: |
+          python -m unittest discover -s tests -v
+
+      - name: Smoke-test CLI commands
+        run: |
+          vpxc --version
+          vpxc roundtrip docs/assets/kawaguchiko_original.png --effort 0
+          vpxc roundtrip docs/assets/kawaguchiko_original.png --effort 1
+
+  fuzz-smoke:
+    name: libFuzzer + ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Clang fuzzer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
+
+      - name: Build & run decoder fuzzer
+        run: |
+          cmake -S cpp -B cpp/build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DVPXC_BUILD_FUZZER=ON
+          cmake --build cpp/build-fuzz --target vpxc_fuzz_decode -j
+          ./cpp/build-fuzz/vpxc_fuzz_decode -runs=25000 -max_len=4096 -rss_limit_mb=512

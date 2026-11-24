@@ -1,14 +1,54 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "vpxc"
-version = "0.3.0"
-description = "Lossless image compression with Symplectic Lattice-Gauge Flows (SLGF)"
+version = "0.4.0"
+description = "Deterministic lossless image, 3D medical volume (CT/MRI), and DICOM codec"
 readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "psspssr"}]
 requires-python = ">=3.9"
+keywords = [
+    "compression",
+    "lossless",
+    "image-compression",
+    "medical-imaging",
+    "dicom",
+    "ct",
+    "mri",
+    "rans",
+    "simd",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: System :: Archiving :: Compression",
+]
 dependencies = ["numpy>=1.22"]
 
 [project.optional-dependencies]
 images = ["pillow>=9"]
 bench = ["pillow>=9", "imagecodecs>=2023.1"]
+
+[project.urls]
+Homepage = "https://github.com/psspssr/vpxc"
+Repository = "https://github.com/psspssr/vpxc"
+Issues = "https://github.com/psspssr/vpxc/issues"
 
 [project.scripts]
 vpxc = "vpxc.cli:main"

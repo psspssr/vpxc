@@ -1,26 +1,19 @@
-# Python & codec artifacts
+# Python, build & profiling artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
-*.vpxc
 .venv/
-*.so
-cpp/build/
-training/train_frontier
+build/
+dist/
+*.egg-info/
+gmon.out
 
-# LaTeX build and auxiliary artifacts
-*.aux
-*.bbl
-*.blg
-*.fdb_latexmk
-*.fls
-*.lof
-*.log
-*.lot
-*.nav
-*.out
-*.snm
-*.synctex.gz
-*.toc
-*.xdv
-paper/build/
+# Codec bitstreams & native build trees
+*.vpxc
+*.vpxv
+*.vpxd
+*.so
+*.dylib
+*.dll
+cpp/build*/
+training/train_frontier

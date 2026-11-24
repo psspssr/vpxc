@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -17,7 +19,17 @@ import numpy as np
 from vpxc.errors import CodecError
 
 ROOT = Path(__file__).resolve().parents[1]
-LIB = ROOT / "cpp" / "build" / "libvpxc_native.so"
+
+
+def _find_native_lib() -> Path:
+    for name in ("libvpxc_native.so", "libvpxc_native.dylib", "vpxc_native.dll"):
+        cand = ROOT / "cpp" / "build" / name
+        if cand.is_file():
+            return cand
+    return ROOT / "cpp" / "build" / "libvpxc_native.so"
+
+
+LIB = _find_native_lib()
 FRONTIER_OBJ = ROOT / "cpp" / "build" / "CMakeFiles" / "vpxc.dir" / "src" / "frontier.cpp.o"
 FAST_OBJ = ROOT / "cpp" / "build" / "CMakeFiles" / "vpxc.dir" / "src" / "fast_codec.cpp.o"
 MEDICAL_OBJ = ROOT / "cpp" / "build" / "CMakeFiles" / "vpxc.dir" / "src" / "medical.cpp.o"
@@ -148,10 +160,12 @@ class TestNativeCodec(unittest.TestCase):
             with self.assertRaises(CodecError):
                 decode(bytes(mut))
 
-    @unittest.skipUnless(FRONTIER_OBJ.is_file(), "frontier.cpp.o not present")
+    @unittest.skipUnless(FRONTIER_OBJ.is_file() and shutil.which("objdump"), "frontier.cpp.o or objdump not present")
     def test_frontier_decode_machine_code_has_zero_float_ops(self) -> None:
         out = subprocess.check_output(["objdump", "-d", "-C", str(FRONTIER_OBJ)], text=True)
-        fp_pat = re.compile(r"\b(add|sub|mul|div|sqrt|min|max|ucomi|comi|cvt)[a-z]*(ss|sd|ps|pd)\b")
+        fp_pat = re.compile(
+            r"\t((add|sub|mul|div|sqrt|min|max|ucomi|comi|cvt)[a-z]*(ss|sd|ps|pd)|fadd|fsub|fmul|fdiv|scvtf|ucvtf|fcvtzs)\b"
+        )
         decode_keywords = (
             "decode_",
             "MATree::read",
@@ -178,9 +192,14 @@ class TestNativeCodec(unittest.TestCase):
                     self.assertIsNone(fp_pat.search(insn), f"FP op in {header}: {insn}")
         self.assertGreaterEqual(checked, 10)
 
-    @unittest.skipUnless(FAST_OBJ.is_file() and MEDICAL_OBJ.is_file(), "fast/medical object files not present")
+    @unittest.skipUnless(
+        FAST_OBJ.is_file() and MEDICAL_OBJ.is_file() and shutil.which("objdump"),
+        "fast/medical object files or objdump not present",
+    )
     def test_fast_and_medical_decode_machine_code_have_zero_float_ops(self) -> None:
-        fp_pat = re.compile(r"\b(add|sub|mul|div|sqrt|min|max|ucomi|comi|cvt)[a-z]*(ss|sd|ps|pd)\b")
+        fp_pat = re.compile(
+            r"\t((add|sub|mul|div|sqrt|min|max|ucomi|comi|cvt)[a-z]*(ss|sd|ps|pd)|fadd|fsub|fmul|fdiv|scvtf|ucvtf|fcvtzs)\b"
+        )
         for obj, keywords, min_fns in (
             (FAST_OBJ, ("decode_fast", "decode_fast_plane", "color_inv_fast", "FastBitReader"), 2),
             (
@@ -327,8 +346,6 @@ class TestNativeCodec(unittest.TestCase):
             decode_volume(bomb_3d)
 
     def test_arm64_neon_simd_codegen_and_float_freedom(self) -> None:
-        import shutil
-
         clang = shutil.which("clang++")
         if clang is None:
             self.skipTest("clang++ not installed")
@@ -342,26 +359,13 @@ class TestNativeCodec(unittest.TestCase):
         }
         const char* arch_fn() { return vpxc::simd::arch_name(); }
         """
-        proc = subprocess.run(
-            [
-                clang,
-                "--target=aarch64-linux-gnu",
-                "-ffreestanding",
-                "-O3",
-                "-std=c++20",
-                f"-I{simd_hdr}",
-                "-S",
-                "-o",
-                "-",
-                "-x",
-                "c++",
-                "-",
-            ],
-            input=code,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
+        target = "arm64-apple-macos13" if sys.platform == "darwin" else "aarch64-linux-gnu"
+        cmd = [clang, f"--target={target}", "-O3", "-std=c++20", f"-I{simd_hdr}", "-S", "-o", "-", "-x", "c++", "-"]
+        if sys.platform != "darwin":
+            cmd.insert(2, "-ffreestanding")
+        proc = subprocess.run(cmd, input=code, text=True, capture_output=True)
+        if proc.returncode != 0:
+            self.skipTest(f"ARM64 cross-codegen headers unavailable: {proc.stderr.strip()}")
         asm = proc.stdout
         self.assertIn("arm64-neon", asm)
         self.assertIsNone(re.search(r"\b(fadd|fsub|fmul|fdiv|scvtf|fcvtzs)\b", asm))
