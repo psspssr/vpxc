@@ -74,32 +74,47 @@ print(format_benchmark_table(results))
 
 ## Lossless Codec Benchmarks
 
-All benchmarks below measure **actual serialized container sizes** verified for bit-exact lossless reconstruction (`np.array_equal(decoded, original)`). Rates are reported in both **`bpsp`** (bits per sub-pixel / channel sample; raw 8-bit RGB = `8.00 bpsp`) and **`bpp`** (bits per pixel; raw 8-bit RGB = `24.00 bpp`). Reference codecs are C/C++ implementations invoked via `imagecodecs` (`libjxl`, `OpenJPEG`, `libwebp`, `CharLS`, `libpng`, `qoi`), while `vpxc` runs in pure Python + NumPy on CPU.
+All benchmarks below measure **actual serialized container sizes** verified for bit-exact lossless reconstruction (`np.array_equal(decoded, original)`). Rates are reported in **`bpsp`** (bits per sub-pixel / channel sample; raw 8-bit RGB = `8.00 bpsp`) and **`bpp`** (bits per pixel; raw 8-bit RGB = `24.00 bpp`). All codecs run in-process on the same CPU (`vpxc` C++20 native library `cpp/build/libvpxc_native.so`, and `libjxl`, `libwebp`, `OpenJPEG`, `CharLS`, `libpng` via `imagecodecs`).
 
-### 1. Kodak Lossless True Color Suite (All 24 Photographs, `768×512` / `512×768` RGB24)
+Universal `frontier` priors (`cpp/include/vpxc/frontier_priors.hpp`) were trained offline (`training/prepare_corpora.py`, `training/train_frontier.cpp`) with 8-fold image-grouped cross-validation and James-Stein $t$-statistic stability shrinkage on an independent CLIC + synthetic training split, verified by SHA-256 and $16\times 16$ perceptual distance to have **zero overlap** with either held-out test set below.
 
-| Codec | Total Size (bytes) | Rate (`bpsp`) | Rate (`bpp`) | Compression Ratio | Implementation |
-| :--- | ---: | ---: | ---: | ---: | :--- |
-| `JPEG XL (-d 0 -e 9)` | 10,009,376 | 2.8284 | 8.4851 | 2.83x | C++ (`libjxl`, effort 9) |
-| **`vpxc` (`SLGF`)** | **11,275,519** | **3.1861** | **9.5584** | **2.51x** | **Pure Python + NumPy (zero weights)** |
-| `JPEG 2000 (5/3)` | 11,296,508 | 3.1921 | 9.5762 | 2.51x | C (`OpenJPEG` reversible DWT) |
-| `WebP-L (-z 9)` | 11,425,502 | 3.2285 | 9.6855 | 2.48x | C (`libwebp` lossless level 9) |
-| `JPEG-LS` | 15,421,702 | 4.3577 | 13.0731 | 1.84x | C++ (`CharLS`) |
-| `PNG (opt)` | 15,588,128 | 4.4047 | 13.2142 | 1.82x | C (`libpng` level 9) |
-| `QOI` | 16,501,520 | 4.6628 | 13.9885 | 1.72x | C (`qoi`) |
+### 1. Blind Held-Out Modern `4:4:4` Photography (`TEST_CLIC`, 24 Disjoint Photographs, `768×512` RGB24)
 
-Sample per-image rates (`bpsp`) across representative Kodak photographs:
+| Codec | Rate (`bpsp`) | Rate (`bpp`) | Ratio | Encode (`ms/img`) | Decode (`ms/img`) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **`vpxc (-e 3, tile=768)`** | **2.7906** | **8.3718** | **2.87x** | **1,193.4** | **241.6** |
+| **`vpxc (-e 3, tile=384)`** | **2.7962** | **8.3886** | **2.86x** | **808.1** | **96.5** |
+| **`vpxc (-e 2, tile=384)`** | **2.8070** | **8.4210** | **2.85x** | **331.0** | **99.9** |
+| **`vpxc (-e 1, default 384)`** | **2.8215** | **8.4645** | **2.84x** | **112.9** | **99.6** |
+| **`vpxc (-e 1, tile=256)`** | **2.8262** | **8.4786** | **2.83x** | **99.6** | **85.0** |
+| `JPEG XL (-d 0 -e 9)` | 2.8651 | 8.5953 | 2.79x | 1,247.9 | 84.3 |
+| `JPEG XL (-d 0 -e 7)` | 2.9040 | 8.7120 | 2.75x | 400.6 | 83.5 |
+| `JPEG XL (-d 0 -e 5)` | 2.9555 | 8.8665 | 2.71x | 204.6 | 71.9 |
+| `JPEG XL (-d 0 -e 3)` | 3.0388 | 9.1164 | 2.63x | 45.0 | 32.4 |
+| `WebP-L (lossless)` | 3.2021 | 9.6063 | 2.50x | 157.5 | 7.1 |
+| `JPEG 2000 (5/3)` | 3.2187 | 9.6561 | 2.49x | 75.1 | 66.0 |
+| `JPEG-LS` | 4.2744 | 12.8232 | 1.87x | 19.5 | 15.1 |
+| `PNG (level 9)` | 4.3926 | 13.1778 | 1.82x | 106.2 | 5.3 |
 
-| Image | `JPEG XL (-e 9)` | **`vpxc` (`SLGF`)** | `JPEG 2000 (5/3)` | `WebP-L (-z 9)` | `PNG (opt)` | `QOI` |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `kodim01` (stone wall) | 3.0840 | **3.5420** | 3.4618 | 3.4442 | 4.9099 | 5.0601 |
-| `kodim05` (motocross) | 3.1642 | **3.6537** | 3.5750 | 3.5481 | 5.1481 | 5.4795 |
-| `kodim07` (shuttered window) | 2.4550 | **2.8225** | 2.8669 | 2.8661 | 3.6881 | 4.2121 |
-| `kodim13` (mountain stream) | 3.5786 | **3.9311** | 3.9682 | 4.1328 | 5.6672 | 5.7924 |
-| `kodim15` (portrait) | 2.6656 | **2.9967** | 2.9808 | 3.1059 | 4.0085 | 4.3649 |
-| `kodim23` (macaws) | 2.5245 | **2.8471** | 2.8352 | 2.9018 | 3.8985 | 4.5793 |
+### 2. Blind Held-Out Kodak Lossless True Color Suite (All 24 Photographs, `768×512` / `512×768` RGB24)
 
-### 2. 16-Bit High-Dynamic-Range / Medical CT Slice (`512×512 uint16`, Raw = `16.00 bpsp`)
+| Codec | Rate (`bpsp`) | Rate (`bpp`) | Ratio | Encode (`ms/img`) | Decode (`ms/img`) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **`vpxc (-e 3, tile=768)`** | **2.8227** | **8.4681** | **2.83x** | **1,139.0** | **225.0** |
+| `JPEG XL (-d 0 -e 9)` | 2.8284 | 8.4851 | 2.83x | 1,318.5 | 94.5 |
+| **`vpxc (-e 3, tile=384)`** | **2.8515** | **8.5545** | **2.81x** | **805.3** | **90.5** |
+| `JPEG XL (-d 0 -e 7)` | 2.8630 | 8.5890 | 2.79x | 435.7 | 91.3 |
+| **`vpxc (-e 2, tile=384)`** | **2.8794** | **8.6382** | **2.78x** | **322.3** | **98.2** |
+| **`vpxc (-e 1, default 384)`** | **2.9046** | **8.7138** | **2.75x** | **104.4** | **94.1** |
+| **`vpxc (-e 1, tile=256)`** | **2.9173** | **8.7519** | **2.74x** | **89.6** | **84.4** |
+| `JPEG XL (-d 0 -e 5)` | 3.0534 | 9.1602 | 2.62x | 202.6 | 76.0 |
+| `JPEG XL (-d 0 -e 3)` | 3.1461 | 9.4383 | 2.54x | 46.0 | 32.7 |
+| `JPEG 2000 (5/3)` | 3.1921 | 9.5762 | 2.51x | 74.2 | 65.4 |
+| `WebP-L (lossless)` | 3.2033 | 9.6099 | 2.50x | 168.2 | 6.9 |
+| `JPEG-LS` | 4.3577 | 13.0731 | 1.84x | 19.4 | 15.0 |
+| `PNG (level 9)` | 4.4047 | 13.2142 | 1.82x | 90.7 | 5.2 |
+
+### 3. 16-Bit High-Dynamic-Range / Medical CT Slice (`512×512 uint16`, Raw = `16.00 bpsp`)
 
 | Codec | Size (bytes) | Rate (`bpsp`) | Compression Ratio |
 | :--- | ---: | ---: | ---: |
@@ -109,7 +124,7 @@ Sample per-image rates (`bpsp`) across representative Kodak photographs:
 | `JPEG 2000 (5/3)` | 239,708 | 7.3153 | 2.19x |
 | `PNG (opt)` | 325,966 | 9.9477 | 1.61x |
 
-### 3. UI / Diagram Screen Content (`512×512` RGB24, Sparse Palette)
+### 4. UI / Diagram Screen Content (`512×512` RGB24, Sparse Palette)
 
 | Codec | Size (bytes) | Rate (`bpsp`) | Rate (`bpp`) | Compression Ratio |
 | :--- | ---: | ---: | ---: | ---: |
@@ -127,9 +142,9 @@ Sample per-image rates (`bpsp`) across representative Kodak photographs:
 
 | Option | Values | Default | Description |
 | :--- | :--- | :---: | :--- |
-| `--tile` | `8 .. 4096` | `768` | Independent tile dimension in pixels (caps peak working RAM) |
-| `--effort` | `1`, `2`, `3` | `2` | `1` = fast selection; `2` = MANIAC / acquisition / D8 search; `3` = SLGF-Max (`S^3-BB-rANS` and the INT8 stem) |
-| `--profile` | `slgf`, `slgf-zero`, `kalman`, `palette`, `qx-rans`, `qx-rice`, `raster`, `raw` | Auto | Force a tile coder. `slgf-zero` is the weight-free profile |
+| `--tile` | `8 .. 4096` | `384` | Independent tile dimension in pixels (enables multi-threaded tile parallelism and caps RAM) |
+| `--effort` | `1`, `2`, `3` | `1` | `1` = fast single-pass `frontier` prior + NLMS + Universal `MA` tree (`~100 ms`); `2` = subsampled MAP Ridge + `O(1)` histogram `MA` tree; `3` = full-tile MAP + exhaustive RCT/coset search |
+| `--profile` | `frontier`, `wp`, `slgf`, `slgf-zero`, `kalman`, `palette`, `qx-rans`, `qx-rice`, `raster`, `raw` | Auto | Force a tile coder (`frontier` is the default native C++20 photography coder) |
 
 ---
 

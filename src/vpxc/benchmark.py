@@ -45,7 +45,7 @@ def _raw_bytes(image: np.ndarray) -> int:
 
 
 def _run_vpxc(
-    image: np.ndarray, *, tile: int = TILE, effort: int = 2, profile: str | None = None
+    image: np.ndarray, *, tile: int = TILE, effort: int = 1, profile: str | None = None
 ) -> tuple[bytes, np.ndarray, float, float]:
     t0 = time.perf_counter()
     blob = encode(image, tile=tile, effort=effort, profile=profile)
@@ -183,30 +183,35 @@ def _discover_external_runners() -> list[tuple[str, CodecRunner]]:
 
         runners.append(("JPEG 2000 (5/3)", _jp2_ic))
 
-    # 6. JPEG XL (-d 0 -e 9)
+    # 6. JPEG XL (-d 0 -e 3 / -e 7 / -e 9)
     if ic is not None and hasattr(ic, "jpegxl_encode"):
+        for jxl_eff in (3, 7, 9):
 
-        def _jxl_ic(arr: np.ndarray):
-            t0 = time.perf_counter()
-            blob = ic.jpegxl_encode(arr, lossless=True, effort=9)
-            enc_ms = (time.perf_counter() - t0) * 1000.0
-            t0 = time.perf_counter()
-            back = ic.jpegxl_decode(blob)
-            dec_ms = (time.perf_counter() - t0) * 1000.0
-            if back.ndim == 3 and back.shape[2] == 1 and arr.ndim == 2:
-                back = back[:, :, 0]
-            return blob, back, enc_ms, dec_ms
+            def _make_jxl_ic(eff_lvl: int):
+                def _jxl_ic(arr: np.ndarray):
+                    t0 = time.perf_counter()
+                    blob = ic.jpegxl_encode(arr, lossless=True, effort=eff_lvl)
+                    enc_ms = (time.perf_counter() - t0) * 1000.0
+                    t0 = time.perf_counter()
+                    back = ic.jpegxl_decode(blob)
+                    dec_ms = (time.perf_counter() - t0) * 1000.0
+                    if back.ndim == 3 and back.shape[2] == 1 and arr.ndim == 2:
+                        back = back[:, :, 0]
+                    return blob, back, enc_ms, dec_ms
 
-        runners.append(("JPEG XL (-e 9)", _jxl_ic))
+                return _jxl_ic
+
+            runners.append((f"JPEG XL (-e {jxl_eff})", _make_jxl_ic(jxl_eff)))
     elif ffmpeg_bin is not None:
-        runners.append(
-            (
-                "JPEG XL (-e 9)",
-                _make_ffmpeg_runner(
-                    ffmpeg_bin, "libjxl", ".jxl", ["-distance", "0", "-effort", "9"]
-                ),
+        for jxl_eff in (3, 7, 9):
+            runners.append(
+                (
+                    f"JPEG XL (-e {jxl_eff})",
+                    _make_ffmpeg_runner(
+                        ffmpeg_bin, "libjxl", ".jxl", ["-distance", "0", "-effort", str(jxl_eff)]
+                    ),
+                )
             )
-        )
 
     return runners
 
@@ -288,7 +293,7 @@ def benchmark_image(
     image: np.ndarray,
     *,
     tile: int = TILE,
-    effort: int = 2,
+    effort: int = 1,
     profile: str | None = None,
     include_external: bool = True,
 ) -> list[CodecResult]:
@@ -304,7 +309,7 @@ def benchmark_image(
     )
     if v_back.shape != src.shape or v_back.dtype != src.dtype or not np.array_equal(v_back, src):
         raise RuntimeError("vpxc lossless verification failed")
-    label = f"vpxc ({profile})" if profile else "vpxc (SLGF)"
+    label = f"vpxc ({profile})" if profile else f"vpxc (-e {effort})"
     results.append(
         CodecResult(
             codec=label,
