@@ -82,8 +82,21 @@ class RansEncoder {
 class RansDecoder {
  public:
   explicit RansDecoder(std::span<const uint8_t> data);
-  int cf() const;
-  void advance(int start, int freq);
+  inline int cf() const { return int(state_ & static_cast<uint64_t>(RANS_M - 1)); }
+  inline void advance(int start, int freq) {
+    const uint64_t c = state_ & static_cast<uint64_t>(RANS_M - 1);
+    uint64_t x = static_cast<uint64_t>(freq) * (state_ >> RANS_SCALE) + c - static_cast<uint64_t>(start);
+    while (x < RANS64_L) {
+      if (pos_ + 4 > size_) throw CodecError("truncated rANS stream");
+      const uint8_t* p = data_ + pos_;
+      const uint32_t word =
+          uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+      pos_ += 4;
+      x = (x << 32) | word;
+    }
+    state_ = x;
+  }
+  void check_finished() const;
 
  private:
   const uint8_t* data_ = nullptr;
@@ -189,6 +202,7 @@ class ParametricDecoder {
   ParametricDecoder& operator=(ParametricDecoder&&) noexcept = default;
 
   int32_t read(int sig_i, int frac_i, std::optional<std::pair<int, int>> bridge = std::nullopt);
+  void check_finished() const;
 
  private:
   struct BiKey {

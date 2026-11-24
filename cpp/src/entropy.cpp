@@ -327,16 +327,60 @@ int bisect_right(const int32_t* values, int n, int target) {
   return lo;
 }
 
-void rans_push(uint64_t& state, std::vector<uint32_t>& words, int start, int freq) {
+struct RansRecipTable {
+  uint64_t mul[RANS_M + 1];
+  uint8_t sh[RANS_M + 1];
+  bool is_pow2[RANS_M + 1];
+};
+
+const RansRecipTable& get_rans_recip() {
+  static const RansRecipTable tbl = [] {
+    RansRecipTable t{};
+    for (int f = 1; f <= RANS_M; ++f) {
+      const int s = 31 - __builtin_clz(static_cast<uint32_t>(f));
+      t.sh[f] = static_cast<uint8_t>(s);
+      if ((f & (f - 1)) == 0) {
+        t.is_pow2[f] = true;
+        t.mul[f] = 0;
+      } else {
+        t.is_pow2[f] = false;
+        const unsigned __int128 num = (static_cast<unsigned __int128>(1) << (64 + s)) + static_cast<unsigned>(f - 1);
+        t.mul[f] = static_cast<uint64_t>(num / static_cast<unsigned>(f));
+      }
+    }
+    return t;
+  }();
+  return tbl;
+}
+
+inline void rans_push(uint64_t& state, std::vector<uint32_t>& words, int start, int freq) {
   if (freq <= 0) throw CodecError("rANS frequency must be positive");
   uint64_t x = state;
+  const uint64_t f = static_cast<uint64_t>(freq);
+  if (freq <= RANS_M) {
+    const uint64_t x_max = ((RANS64_L >> RANS_SCALE) << 32) * f;
+    if (x >= x_max) {
+      words.push_back(static_cast<uint32_t>(x));
+      x >>= 32;
+    }
+    const RansRecipTable& rt = get_rans_recip();
+    uint64_t q;
+    if (rt.is_pow2[freq]) {
+      q = x >> rt.sh[freq];
+    } else {
+      const uint64_t hi = static_cast<uint64_t>((static_cast<unsigned __int128>(x) * rt.mul[freq]) >> 64);
+      q = hi >> rt.sh[freq];
+    }
+    const uint64_t r = x - q * f;
+    state = (q << RANS_SCALE) + static_cast<uint64_t>(start) + r;
+    return;
+  }
   const uint64_t base = (RANS64_L >> RANS_SCALE) << 32;
   const unsigned __int128 x_max = static_cast<unsigned __int128>(base) * static_cast<unsigned __int128>(freq);
   while (static_cast<unsigned __int128>(x) >= x_max) {
     words.push_back(static_cast<uint32_t>(x));
     x >>= 32;
   }
-  const uint64_t f = static_cast<uint64_t>(freq);
   const uint64_t q = x / f;
   const uint64_t r = x % f;
   state = (q << RANS_SCALE) + static_cast<uint64_t>(start) + r;
@@ -758,10 +802,8 @@ RansDecoder::RansDecoder(std::span<const uint8_t> data) : data_(data.data()), si
   state_ = (uint64_t(hi) << 32) | lo;
 }
 
-int RansDecoder::cf() const { return int(state_ & static_cast<uint64_t>(RANS_M - 1)); }
-
-void RansDecoder::advance(int start, int freq) {
-  state_ = rans_advance_state(state_, start, freq, data_, size_, pos_);
+void RansDecoder::check_finished() const {
+  if (pos_ != size_ || state_ != RANS64_L) throw CodecError("non-canonical rANS terminal state");
 }
 
 void RansBitsBackStack::push(int start, int freq) { rans_push(state, words, start, freq); }
@@ -1207,6 +1249,13 @@ int32_t ParametricDecoder::read(int sig_i, int frac_i, std::optional<std::pair<i
   pos_ = cursor.pos;
   x_ = cursor.x;
   return static_cast<int32_t>(value);
+}
+
+void ParametricDecoder::check_finished() const {
+  if (pos_ != raw_.size() || x_ != RANS64_L) {
+    throw CodecError("non-canonical parametric rANS terminal state");
+  }
+  if (reader_) reader_->check_zero_tail();
 }
 
 Plane shift_map_from_activity(const Plane& activity_ctx) {
