@@ -5,6 +5,7 @@
 #include "vpxc/color.hpp"
 #include "vpxc/entropy.hpp"
 #include "vpxc/error.hpp"
+#include "vpxc/simd.hpp"
 
 #include <algorithm>
 #include <array>
@@ -75,6 +76,12 @@ constexpr FastIntLuts kFast = make_fast_int_luts();
 inline int flog2_u32(uint32_t x) { return x ? (31 - __builtin_clz(x)) : 0; }
 inline int flog2_u64(uint64_t x) { return x ? (63 - __builtin_clzll(x)) : 0; }
 
+// Dynamic gradient/bilateral shift scaled to actual effective sample range (restores soft-tissue precision on 10/12/14-bit CT & MRI).
+inline int qsh_for_maxv(int maxv) noexcept {
+  if (maxv <= 255) return 0;
+  return std::clamp(flog2_u32(static_cast<uint32_t>(maxv)) - 7, 1, 8);
+}
+
 inline int32_t iabs32(int32_t v) {
   if (v >= 0) return v;
   if (v == INT32_MIN) return INT32_MAX;
@@ -136,7 +143,7 @@ inline int16_t get_prior_weight(int role, int sec, int a) {
 // Normative division-free integer NLMS update shared identically by Encode & Decode.
 __attribute__((always_inline)) inline void nlms_update(int32_t* ws_q16, int16_t* ws_q8, int D, const int32_t* f,
                                                        int64_t raw_err_q4, int nlms_gain, int qsh) {
-  const int64_t err_s = raw_err_q4 >> qsh;
+  const int64_t err_s = std::clamp<int64_t>(raw_err_q4 >> qsh, -(1LL << 26), 1LL << 26);
   if (err_s >= -1 && err_s <= 1) return;
   uint64_t e2 = 4096;
   if (qsh == 0) {
@@ -148,11 +155,12 @@ __attribute__((always_inline)) inline void nlms_update(int32_t* ws_q16, int16_t*
     if (sh >= 24) return;
     const uint64_t idx_d = std::min<uint64_t>(63, e2 >> sh);
     const int64_t inv_q24 = static_cast<int64_t>(kDiv[idx_d + 1]) >> sh;
-    const int32_t step = static_cast<int32_t>(std::clamp<int64_t>((err_s * nlms_gain * inv_q24) >> 8, -2048, 2048));
+    const int64_t step = std::clamp<int64_t>((err_s * nlms_gain * inv_q24) >> 8, -2048, 2048);
     if (step == 0) return;
     for (int a = 0; a < D; ++a) {
-      const int32_t nw = std::clamp<int32_t>(
-          ws_q16[a] + static_cast<int32_t>((static_cast<int64_t>(f[a]) * step) >> 8), -1536 << 8, 1536 << 8);
+      const int32_t nw = static_cast<int32_t>(
+          std::clamp<int64_t>(static_cast<int64_t>(ws_q16[a]) + ((static_cast<int64_t>(f[a]) * step) >> 8),
+                              -393216, 393216));
       ws_q16[a] = nw;
       ws_q8[a] = static_cast<int16_t>(nw >> 8);
     }
@@ -169,8 +177,8 @@ __attribute__((always_inline)) inline void nlms_update(int32_t* ws_q16, int16_t*
     if (step == 0) return;
     for (int a = 0; a < D; ++a) {
       const int64_t fs = static_cast<int64_t>(f[a] >> qsh);
-      const int32_t nw =
-          std::clamp<int32_t>(ws_q16[a] + static_cast<int32_t>((fs * step) >> 8), -1536 << 8, 1536 << 8);
+      const int32_t nw = static_cast<int32_t>(
+          std::clamp<int64_t>(static_cast<int64_t>(ws_q16[a]) + ((fs * step) >> 8), -393216, 393216));
       ws_q16[a] = nw;
       ws_q8[a] = static_cast<int16_t>(nw >> 8);
     }
@@ -755,7 +763,7 @@ struct PatchPredictor {
 
   __attribute__((noinline)) PatchPredictor(int maxv, bool en, bool is_chroma = false)
       : table(en ? kBuckets * 2 : 0, 0u),
-        qsh(maxv > 255 ? 8 : 0),
+        qsh(qsh_for_maxv(maxv)),
         grad_thr(is_chroma ? 18 : 12),
         enabled(en) {}
 
@@ -852,7 +860,7 @@ struct RasterState {
         c_idx(c),
         rct_mode(rm),
         maxv(mv),
-        qsh(mv > 255 ? 8 : 0),
+        qsh(qsh_for_maxv(mv)),
         D(!has_c0 ? 21 : (!has_c1 ? 30 : 36)),
         n_sec(16),
         stride(w + 2),
@@ -1115,30 +1123,35 @@ struct RasterState {
     }
 
     if (prp != nullptr) {
-      const uint32_t ew = static_cast<uint32_t>(iabs32(reW));
-      const uint32_t en = static_cast<uint32_t>(iabs32(reN));
-      const uint32_t enw = static_cast<uint32_t>(iabs32(reNW));
-      const uint32_t ene = static_cast<uint32_t>(iabs32(reNE));
-      const uint32_t eww = static_cast<uint32_t>(iabs32(reWW));
-      const uint32_t enn = static_cast<uint32_t>(iabs32(reNN));
+      const int psh = std::max(0, qsh - 4);
+      const uint32_t ew = static_cast<uint32_t>(iabs32(reW)) >> psh;
+      const uint32_t en = static_cast<uint32_t>(iabs32(reN)) >> psh;
+      const uint32_t enw = static_cast<uint32_t>(iabs32(reNW)) >> psh;
+      const uint32_t ene = static_cast<uint32_t>(iabs32(reNE)) >> psh;
+      const uint32_t eww = static_cast<uint32_t>(iabs32(reWW)) >> psh;
+      const uint32_t enn = static_cast<uint32_t>(iabs32(reNN)) >> psh;
+      const uint32_t af0 = static_cast<uint32_t>(iabs32(f[0])) >> psh;
+      const uint32_t af1 = static_cast<uint32_t>(iabs32(f[1])) >> psh;
+      const uint64_t df01 = static_cast<uint64_t>(iabs64(int64_t(f[0]) - f[1])) >> psh;
+      const uint32_t af10 = static_cast<uint32_t>(iabs32(f[10])) >> psh;
       prp[0] = static_cast<int16_t>(flog2_u64(2ull * (ew + en) + enw + ene + ((eww + enn) >> 1) + 1ull));
       prp[1] = static_cast<int16_t>(flog2_u32(ew + 1));
       prp[2] = static_cast<int16_t>(flog2_u32(en + 1));
       prp[3] = static_cast<int16_t>(flog2_u32(enw + ene + 1));
-      prp[4] = static_cast<int16_t>(flog2_u32(static_cast<uint32_t>(iabs32(f[0])) + 1));
-      prp[5] = static_cast<int16_t>(flog2_u32(static_cast<uint32_t>(iabs32(f[1])) + 1));
-      prp[6] = static_cast<int16_t>(flog2_u64(static_cast<uint64_t>(iabs64(int64_t(f[0]) - f[1])) + 1ull));
-      prp[7] = static_cast<int16_t>(flog2_u32(static_cast<uint32_t>(iabs32(f[10])) + 1));
+      prp[4] = static_cast<int16_t>(flog2_u32(af0 + 1));
+      prp[5] = static_cast<int16_t>(flog2_u32(af1 + 1));
+      prp[6] = static_cast<int16_t>(flog2_u64(df01 + 1ull));
+      prp[7] = static_cast<int16_t>(flog2_u32(af10 + 1));
       prp[8] = static_cast<int16_t>(sec);
       prp[9] = static_cast<int16_t>((reW >= 0 ? 1 : -1) * flog2_u32(ew + 1));
       prp[10] = static_cast<int16_t>((reN >= 0 ? 1 : -1) * flog2_u32(en + 1));
       prp[11] = static_cast<int16_t>(patch_conf);
       prp[12] = static_cast<int16_t>(
-          C0 != nullptr ? flog2_u32(static_cast<uint32_t>(iabs32(C0_err->samples[row + x])) + 1)
+          C0 != nullptr ? flog2_u32((static_cast<uint32_t>(iabs32(C0_err->samples[row + x])) >> psh) + 1)
                         : (((y & 1) << 1) | (x & 1)));
       prp[13] = static_cast<int16_t>(
-          C0 != nullptr ? flog2_u32(static_cast<uint32_t>(iabs32(bilat_diff)) + 1)
-                        : flog2_u64(static_cast<uint64_t>(dh_g) + static_cast<uint64_t>(dv_g) + 1ull));
+          C0 != nullptr ? flog2_u32((static_cast<uint32_t>(iabs32(bilat_diff)) >> psh) + 1)
+                        : flog2_u64(((static_cast<uint64_t>(dh_g) + static_cast<uint64_t>(dv_g)) >> psh) + 1ull));
     }
     return pred_q4;
   }
@@ -1179,7 +1192,7 @@ inline int64_t interp_features_exact(const Plane& P, const Plane& C0, const Plan
                                      int16_t* prp) {
   const int H = P.height;
   const int W = P.width;
-  const int qsh = maxv > 255 ? 8 : 0;
+  const int qsh = qsh_for_maxv(maxv);
   const auto* nbs = stg == 1 ? kStageNbs1 : (stg == 2 ? kStageNbs2 : kStageNbs3);
   const int Knb = stg == 1 ? 12 : 10;
   const int32_t* ps = P.samples.data();
@@ -1504,6 +1517,21 @@ struct HistCostTables {
   float sigma_rm[NUM_SIGMAS][32];
 };
 
+inline uint8_t rm_bin_from_abs(uint32_t ar) noexcept {
+  if (ar < 16u) return static_cast<uint8_t>(ar);
+  const int lg = flog2_u32(ar);
+  const int sub = static_cast<int>((ar >> (lg - 1)) & 1u);
+  const int idx = 16 + (lg - 4) * 2 + sub;
+  return static_cast<uint8_t>(idx > 31 ? 31 : idx);
+}
+
+inline int rm_bin_rep(int rm) noexcept {
+  if (rm < 16) return rm;
+  const int lg = 4 + ((rm - 16) >> 1);
+  const int base = 1 << lg;
+  return ((rm - 16) & 1) ? (base + (base >> 1) + (base >> 2)) : (base + (base >> 2));
+}
+
 const HistCostTables& get_hist_cost_tables() {
   static const HistCostTables t = [] {
     HistCostTables h{};
@@ -1513,7 +1541,7 @@ const HistCostTables& get_hist_cost_tables() {
       h.neg_log_q6[i] = static_cast<uint16_t>(std::min(65535.0, std::rint(h.neg_log[i] * 64.0)));
     }
     for (int rm = 0; rm < 32; ++rm) {
-      const int r_mag = rm < 31 ? rm : 42;
+      const int r_mag = rm_bin_rep(rm);
       for (int s = 0; s < NUM_SIGMAS; ++s) {
         const int sh = ptbl.shifts[s];
         const int64_t bias = sh > 0 ? (1LL << (sh - 1)) : 0;
@@ -1765,7 +1793,7 @@ std::vector<uint8_t> encode_ma_stream(const std::vector<int32_t>& resid, const s
   // Precompute exact 32-bin integer residual magnitude per sample once (L2-resident).
   std::vector<uint8_t> rm_vec(static_cast<size_t>(N));
   for (int i = 0; i < N; ++i) {
-    rm_vec[static_cast<size_t>(i)] = static_cast<uint8_t>(std::min<int32_t>(31, iabs32(resid[static_cast<size_t>(i)])));
+    rm_vec[static_cast<size_t>(i)] = rm_bin_from_abs(static_cast<uint32_t>(iabs32(resid[static_cast<size_t>(i)])));
   }
 
   constexpr int kPropMin = -20;
@@ -2036,10 +2064,8 @@ std::vector<uint8_t> encode_channel_raster_exact(const Plane& P, int c_idx, int 
         const int64_t pred_q4 = st.predict_features(P, C0, C0_err, C1, C1_err, y, x, f, sec, prp, pr_out);
         const auto& w8 = ws_q8[sec];
         int64_t acc = 128;
-        if (st.qsh == 0) {
-          int32_t acc32 = 128;
-          for (int a = 0; a < 36; ++a) acc32 += f[a] * static_cast<int32_t>(w8[a]);
-          acc = acc32;
+        if (maxv <= 4095) {
+          acc += simd::dot36_i32_i16(f, w8.data());
         } else {
           for (int a = 0; a < D; ++a) acc += static_cast<int64_t>(f[a]) * w8[a];
         }
@@ -2168,10 +2194,8 @@ std::vector<uint8_t> encode_channel_raster_exact(const Plane& P, int c_idx, int 
         const int64_t pred_q4 = st.predict_features(P, C0, C0_err, C1, C1_err, y, x, f, sec, prp, pr_out);
         const auto& w8 = ws_q8[sec];
         int64_t acc = 128;
-        if (st.qsh == 0) {
-          int32_t acc32 = 128;
-          for (int a = 0; a < 36; ++a) acc32 += f[a] * static_cast<int32_t>(w8[a]);
-          acc = acc32;
+        if (maxv <= 4095) {
+          acc += simd::dot36_i32_i16(f, w8.data());
         } else {
           for (int a = 0; a < D; ++a) acc += static_cast<int64_t>(f[a]) * w8[a];
         }
@@ -2254,10 +2278,8 @@ __attribute__((noinline)) Plane decode_channel_raster_exact(const uint8_t* data,
       const int64_t pred_q4 = st.predict_features(P, C0, C0_err, C1, C1_err, y, x, f, sec, prp, pr_out);
       const auto& w8 = ws_q8[sec];
       int64_t acc = 128;
-      if (st.qsh == 0) {
-        int32_t acc32 = 128;
-        for (int a = 0; a < 36; ++a) acc32 += f[a] * static_cast<int32_t>(w8[a]);
-        acc = acc32;
+      if (maxv <= 4095) {
+        acc += simd::dot36_i32_i16(f, w8.data());
       } else {
         for (int a = 0; a < D; ++a) acc += static_cast<int64_t>(f[a]) * w8[a];
       }
@@ -2269,7 +2291,9 @@ __attribute__((noinline)) Plane decode_channel_raster_exact(const uint8_t* data,
       const int leaf = mst.tree.walk(prp);
       const int32_t r = dec.read(leaf, fr);
       const int64_t truth64 = mu_i + static_cast<int64_t>(r);
-      if (truth64 < -262144 || truth64 > 262144) throw CodecError("decoded frontier sample out of range");
+      if (truth64 < -static_cast<int64_t>(maxv) || truth64 > static_cast<int64_t>(maxv)) {
+        throw CodecError("decoded frontier sample out of range");
+      }
       const int32_t truth = static_cast<int32_t>(truth64);
       P.samples[id] = truth;
       out_err_q4.samples[id] = static_cast<int32_t>((truth64 << 4) - mu_q4);
@@ -2327,7 +2351,7 @@ std::vector<uint8_t> encode_chroma_coset_exact(const Plane& P, int c_idx, int rc
     }
   }
 
-  const int qsh = maxv > 255 ? 8 : 0;
+  const int qsh = qsh_for_maxv(maxv);
   const int py_s[4] = {0, 1, 0, 1};
   const int px_s[4] = {0, 1, 1, 0};
   for (int stg = 1; stg <= 3; ++stg) {
@@ -2549,7 +2573,7 @@ __attribute__((noinline)) Plane decode_chroma_coset_exact(const uint8_t* data, s
     }
   }
 
-  const int qsh = maxv > 255 ? 8 : 0;
+  const int qsh = qsh_for_maxv(maxv);
   const int py_s[4] = {0, 1, 0, 1};
   const int px_s[4] = {0, 1, 1, 0};
   for (int stg = 1; stg <= 3; ++stg) {
@@ -2600,7 +2624,9 @@ __attribute__((noinline)) Plane decode_chroma_coset_exact(const uint8_t* data, s
         const int leaf = mst.tree.walk(prp);
         const int32_t r = dec.read(leaf, fr);
         const int64_t truth64 = mu_i + static_cast<int64_t>(r);
-        if (truth64 < -262144 || truth64 > 262144) throw CodecError("decoded frontier coset sample out of range");
+        if (truth64 < -static_cast<int64_t>(maxv) || truth64 > static_cast<int64_t>(maxv)) {
+          throw CodecError("decoded frontier coset sample out of range");
+        }
         const int32_t truth = static_cast<int32_t>(truth64);
         P.samples[y * W + x] = truth;
         const int32_t eq4 = static_cast<int32_t>((truth64 << 4) - mu_q4);
@@ -2623,7 +2649,7 @@ double screen_coset_vs_raster(const Plane& P, const Plane& /*C0*/, int maxv) {
   const int H = P.height;
   const int W = P.width;
   if (H < 8 || W < 8) return 1.0;
-  const int thr = 8 << (maxv > 255 ? 8 : 0);
+  const int thr = 8 << qsh_for_maxv(maxv);
   const int32_t* ps = P.samples.data();
   int64_t sum_mid = 0;
   int64_t sum_grad2 = 0;
@@ -2754,6 +2780,50 @@ std::vector<uint8_t> encode_frontier(const std::vector<Plane>& raw_planes, bool 
   const bool par_ok = (static_cast<int64_t>(H) * W >= 100000) && (std::thread::hardware_concurrency() >= 2);
 
   if (C < 3) {
+    const auto& src = raw_planes[0].samples;
+    int32_t gmin = src[0];
+    int32_t gmax = src[0];
+    for (int32_t v : src) {
+      if (v < gmin) gmin = v;
+      if (v > gmax) gmax = v;
+    }
+    if (gmin < 0 || gmax > maxv) throw CodecError("frontier grayscale sample out of range");
+    if (gmin == gmax) {
+      return {static_cast<uint8_t>(MODE_IDENTITY), 0, 0x10u,
+              static_cast<uint8_t>(gmin & 0xFF), static_cast<uint8_t>((gmin >> 8) & 0xFF)};
+    }
+    uint32_t g = 0;
+    for (int32_t v : src) {
+      const uint32_t d = static_cast<uint32_t>(v - gmin);
+      if (d != 0) {
+        g = g == 0 ? d : std::gcd(g, d);
+        if (g == 1) break;
+      }
+    }
+    const int32_t step = (g > 1 && g <= 65535u) ? static_cast<int32_t>(g) : 1;
+    const int eff_maxv = static_cast<int>((gmax - gmin) / step);
+    if (gmin > 0 || gmax < maxv || step > 1) {
+      Plane sc_p(H, W, 0);
+      for (size_t i = 0; i < src.size(); ++i) {
+        sc_p.samples[i] = (src[i] - gmin) / step;
+      }
+      Plane e0;
+      const auto b0 = encode_channel_raster_exact(sc_p, 0, MODE_IDENTITY, eff_maxv, effort, nullptr, nullptr,
+                                                  nullptr, nullptr, e0);
+      std::vector<uint8_t> out{
+          static_cast<uint8_t>(MODE_IDENTITY),
+          0,
+          0x20u,
+          static_cast<uint8_t>(gmin & 0xFF),
+          static_cast<uint8_t>((gmin >> 8) & 0xFF),
+          static_cast<uint8_t>(eff_maxv & 0xFF),
+          static_cast<uint8_t>((eff_maxv >> 8) & 0xFF),
+          static_cast<uint8_t>(step & 0xFF),
+          static_cast<uint8_t>((step >> 8) & 0xFF),
+      };
+      out.insert(out.end(), b0.begin(), b0.end());
+      return out;
+    }
     Plane e0;
     const auto b0 = encode_channel_raster_exact(raw_planes[0], 0, MODE_IDENTITY, maxv, effort, nullptr, nullptr,
                                                 nullptr, nullptr, e0);
@@ -3003,19 +3073,51 @@ std::vector<Plane> decode_frontier(const uint8_t* data, size_t size, int height,
       (rct_mode == kModeSubAvg && rct_perm > 5)) {
     throw CodecError("invalid frontier color permutation");
   }
-  if ((cflags & ~0x03u) != 0 || (channels < 3 && (rct_mode != MODE_IDENTITY || cflags != 0))) {
-    throw CodecError("invalid frontier flags");
-  }
-
-  size_t pos = 3;
   const int maxv = u16 ? 65535 : 255;
+  size_t pos = 3;
 
   if (channels < 3) {
+    if (rct_mode != MODE_IDENTITY || rct_perm != 0 || (cflags != 0u && cflags != 0x10u && cflags != 0x20u)) {
+      throw CodecError("invalid frontier grayscale flags");
+    }
+    if (cflags == 0x10u) {
+      if (size != 5) throw CodecError("invalid constant frontier grayscale tile");
+      const int32_t cval = static_cast<int32_t>(data[3] | (uint32_t(data[4]) << 8));
+      if (cval > maxv) throw CodecError("constant frontier grayscale value out of range");
+      return {Plane(height, width, cval)};
+    }
+    if (cflags == 0x20u) {
+      if (pos + 6 > size) throw CodecError("truncated frontier grayscale range header");
+      const int32_t gmin = static_cast<int32_t>(data[pos] | (uint32_t(data[pos + 1]) << 8));
+      const int32_t eff_maxv = static_cast<int32_t>(data[pos + 2] | (uint32_t(data[pos + 3]) << 8));
+      const int32_t step = static_cast<int32_t>(data[pos + 4] | (uint32_t(data[pos + 5]) << 8));
+      pos += 6;
+      if (step <= 0 || eff_maxv <= 0 ||
+          static_cast<int64_t>(gmin) + static_cast<int64_t>(eff_maxv) * step > maxv) {
+        throw CodecError("invalid frontier grayscale range header");
+      }
+      Plane e0;
+      Plane p0 = decode_channel_raster_exact(data, size, pos, height, width, 0, MODE_IDENTITY, eff_maxv, nullptr,
+                                             nullptr, nullptr, nullptr, e0);
+      if (pos != size) throw CodecError("trailing bytes in frontier grayscale tile");
+      for (int32_t& s : p0.samples) {
+        if (s < 0 || s > eff_maxv) throw CodecError("decoded frontier compacted sample out of range");
+        s = gmin + s * step;
+      }
+      return {std::move(p0)};
+    }
     Plane e0;
     Plane p0 = decode_channel_raster_exact(data, size, pos, height, width, 0, MODE_IDENTITY, maxv, nullptr,
                                            nullptr, nullptr, nullptr, e0);
     if (pos != size) throw CodecError("trailing bytes in frontier grayscale tile");
+    for (int32_t s : p0.samples) {
+      if (s < 0 || s > maxv) throw CodecError("decoded frontier grayscale sample out of range");
+    }
     return {std::move(p0)};
+  }
+
+  if ((cflags & ~0x03u) != 0) {
+    throw CodecError("invalid frontier flags");
   }
 
   std::vector<Plane> pl(static_cast<size_t>(channels));
@@ -3044,6 +3146,170 @@ std::vector<Plane> decode_frontier(const uint8_t* data, size_t size, int height,
   }
   if (pos != size) throw CodecError("trailing bytes in frontier tile");
   return color_inv_frontier(pl, rct_mode, rct_perm);
+}
+
+std::vector<uint8_t> encode_frontier_slice_3d(const Plane& cur_slice, const Plane& ref_slice,
+                                              const Plane* prev_ref_slice, bool u16, int effort) {
+  const int H = cur_slice.height;
+  const int W = cur_slice.width;
+  if (H <= 0 || W <= 0 || ref_slice.height != H || ref_slice.width != W) {
+    throw CodecError("invalid frontier 3D slice geometry");
+  }
+  if (prev_ref_slice != nullptr && (prev_ref_slice->height != H || prev_ref_slice->width != W)) {
+    throw CodecError("invalid frontier 3D prev_ref_slice geometry");
+  }
+  const int maxv = u16 ? 65535 : 255;
+  const size_t N = cur_slice.samples.size();
+  const int32_t* cs = cur_slice.samples.data();
+  const int32_t* rs = ref_slice.samples.data();
+
+  int32_t cmin = cs[0];
+  int32_t cmax = cs[0];
+  bool same_as_ref = true;
+  for (size_t i = 0; i < N; ++i) {
+    const int32_t v = cs[i];
+    if (v < cmin) cmin = v;
+    if (v > cmax) cmax = v;
+    if (v != rs[i]) same_as_ref = false;
+  }
+  if (cmin < 0 || cmax > maxv) throw CodecError("frontier 3D slice sample out of range");
+  if (same_as_ref) {
+    return {0x11u};
+  }
+  if (cmin == cmax) {
+    return {0x10u, static_cast<uint8_t>(cmin & 0xFF), static_cast<uint8_t>((cmin >> 8) & 0xFF)};
+  }
+
+  int32_t gmin = cmin;
+  int32_t gmax = cmax;
+  for (size_t i = 0; i < N; ++i) {
+    const int32_t rv = rs[i];
+    if (rv < gmin) gmin = rv;
+    if (rv > gmax) gmax = rv;
+  }
+  if (prev_ref_slice != nullptr) {
+    const int32_t* ps = prev_ref_slice->samples.data();
+    for (size_t i = 0; i < N; ++i) {
+      const int32_t pv = ps[i];
+      if (pv < gmin) gmin = pv;
+      if (pv > gmax) gmax = pv;
+    }
+  }
+  if (gmin < 0 || gmax > maxv) throw CodecError("frontier 3D reference sample out of range");
+
+  uint32_t g = 0;
+  auto update_gcd = [&](const int32_t* arr) {
+    if (g == 1) return;
+    for (size_t i = 0; i < N; ++i) {
+      const uint32_t d = static_cast<uint32_t>(arr[i] - gmin);
+      if (d != 0) {
+        g = g == 0 ? d : std::gcd(g, d);
+        if (g == 1) break;
+      }
+    }
+  };
+  update_gcd(cs);
+  update_gcd(rs);
+  if (prev_ref_slice != nullptr) update_gcd(prev_ref_slice->samples.data());
+
+  const int32_t step = (g > 1 && g <= 65535u) ? static_cast<int32_t>(g) : 1;
+  const int eff_maxv = std::max<int>(1, static_cast<int>((gmax - gmin) / step));
+
+  Plane ref_sc(H, W, 0);
+  Plane delta_sc(H, W, 0);
+  Plane zvel_q4(H, W, 0);
+  const int32_t zclamp = static_cast<int32_t>(std::min<int64_t>(524288, static_cast<int64_t>(eff_maxv) * 32));
+  const int32_t* ps = prev_ref_slice != nullptr ? prev_ref_slice->samples.data() : nullptr;
+
+  for (size_t i = 0; i < N; ++i) {
+    const int32_t rc = (rs[i] - gmin) / step;
+    const int32_t cc = (cs[i] - gmin) / step;
+    ref_sc.samples[i] = rc;
+    delta_sc.samples[i] = cc - rc;
+    if (ps != nullptr) {
+      const int32_t pc = (ps[i] - gmin) / step;
+      zvel_q4.samples[i] = std::clamp<int32_t>((rc - pc) << 4, -zclamp, zclamp);
+    }
+  }
+
+  Plane out_e;
+  const auto b_delta =
+      encode_channel_raster_exact(delta_sc, 1, MODE_SUB, eff_maxv, effort, &ref_sc, &zvel_q4, nullptr, nullptr, out_e);
+
+  std::vector<uint8_t> out{
+      0x20u,
+      static_cast<uint8_t>(gmin & 0xFF),
+      static_cast<uint8_t>((gmin >> 8) & 0xFF),
+      static_cast<uint8_t>(eff_maxv & 0xFF),
+      static_cast<uint8_t>((eff_maxv >> 8) & 0xFF),
+      static_cast<uint8_t>(step & 0xFF),
+      static_cast<uint8_t>((step >> 8) & 0xFF),
+  };
+  out.insert(out.end(), b_delta.begin(), b_delta.end());
+  return out;
+}
+
+Plane decode_frontier_slice_3d(const uint8_t* data, size_t size, int height, int width, const Plane& ref_slice,
+                               const Plane* prev_ref_slice, bool u16) {
+  if (data == nullptr || size < 1) throw CodecError("truncated frontier 3D slice");
+  if (height <= 0 || width <= 0 || ref_slice.height != height || ref_slice.width != width) {
+    throw CodecError("invalid frontier 3D slice decode geometry");
+  }
+  if (prev_ref_slice != nullptr && (prev_ref_slice->height != height || prev_ref_slice->width != width)) {
+    throw CodecError("invalid frontier 3D prev_ref_slice decode geometry");
+  }
+  const int maxv = u16 ? 65535 : 255;
+  const uint8_t tag = data[0];
+  if (tag == 0x11u) {
+    if (size != 1) throw CodecError("invalid frontier 3D copy-ref slice");
+    return ref_slice;
+  }
+  if (tag == 0x10u) {
+    if (size != 3) throw CodecError("invalid frontier 3D constant slice");
+    const int32_t cval = static_cast<int32_t>(data[1] | (uint32_t(data[2]) << 8));
+    if (cval > maxv) throw CodecError("frontier 3D constant slice out of range");
+    return Plane(height, width, cval);
+  }
+  if (tag != 0x20u) throw CodecError("invalid frontier 3D slice tag");
+  if (size < 7) throw CodecError("truncated frontier 3D slice range header");
+
+  const int32_t gmin = static_cast<int32_t>(data[1] | (uint32_t(data[2]) << 8));
+  const int32_t eff_maxv = static_cast<int32_t>(data[3] | (uint32_t(data[4]) << 8));
+  const int32_t step = static_cast<int32_t>(data[5] | (uint32_t(data[6]) << 8));
+  if (step <= 0 || eff_maxv <= 0 ||
+      static_cast<int64_t>(gmin) + static_cast<int64_t>(eff_maxv) * step > maxv) {
+    throw CodecError("invalid frontier 3D slice range header");
+  }
+
+  const size_t N = ref_slice.samples.size();
+  const int32_t* rs = ref_slice.samples.data();
+  const int32_t* ps = prev_ref_slice != nullptr ? prev_ref_slice->samples.data() : nullptr;
+  const int32_t zclamp = static_cast<int32_t>(std::min<int64_t>(524288, static_cast<int64_t>(eff_maxv) * 32));
+
+  Plane ref_sc(height, width, 0);
+  Plane zvel_q4(height, width, 0);
+  for (size_t i = 0; i < N; ++i) {
+    const int32_t rc = std::clamp<int32_t>((rs[i] - gmin) / step, 0, eff_maxv);
+    ref_sc.samples[i] = rc;
+    if (ps != nullptr) {
+      const int32_t pc = std::clamp<int32_t>((ps[i] - gmin) / step, 0, eff_maxv);
+      zvel_q4.samples[i] = std::clamp<int32_t>((rc - pc) << 4, -zclamp, zclamp);
+    }
+  }
+
+  size_t pos = 7;
+  Plane out_e;
+  Plane delta_sc = decode_channel_raster_exact(data, size, pos, height, width, 1, MODE_SUB, eff_maxv, &ref_sc,
+                                               &zvel_q4, nullptr, nullptr, out_e);
+  if (pos != size) throw CodecError("trailing bytes in frontier 3D slice");
+
+  Plane out(height, width, 0);
+  for (size_t i = 0; i < N; ++i) {
+    const int32_t cc = ref_sc.samples[i] + delta_sc.samples[i];
+    if (cc < 0 || cc > eff_maxv) throw CodecError("decoded frontier 3D voxel out of range");
+    out.samples[i] = gmin + cc * step;
+  }
+  return out;
 }
 
 }  // namespace vpxc
