@@ -1,4 +1,5 @@
 #include "vpxc/codec.hpp"
+#include "vpxc/fast_codec.hpp"
 #include "vpxc/frontier.hpp"
 #include "vpxc/wp.hpp"
 
@@ -29,6 +30,7 @@ constexpr uint8_t kProfilePalette = 5;
 constexpr uint8_t kProfileSlgf = 6;
 constexpr uint8_t kProfileWp = 7;
 constexpr uint8_t kProfileFrontier = 8;
+constexpr uint8_t kProfileFast = 9;
 constexpr uint8_t kFlagSheaf = 1;
 constexpr uint8_t kColorExtra = 1;
 
@@ -106,8 +108,11 @@ void check_image(const Image& image) {
     throw CodecError("channel count must be 1, 3, or 4");
   }
   if (image.height <= 0 || image.width <= 0) throw CodecError("empty image");
-  if (image.height > 20000 || image.width > 20000) throw CodecError("image dimension exceeds 20000");
+  if (image.height > kMaxImageDim || image.width > kMaxImageDim) {
+    throw CodecError("image dimension exceeds safety limit");
+  }
   const size_t need = image.plane_size() * static_cast<size_t>(image.channels);
+  if (need > kMaxImageSamples) throw CodecError("image sample count exceeds safety limit");
   if (image.samples.size() < need) throw CodecError("image sample buffer has the wrong size");
 }
 
@@ -587,11 +592,20 @@ std::vector<uint8_t> frontier_record(const Image& image, int y0, int y1, int x0,
   return out;
 }
 
+std::vector<uint8_t> fast_record(const Image& image, int y0, int y1, int x0, int x1) {
+  const auto raw_planes = split_region(image, y0, y1, x0, x1);
+  const auto payload = encode_fast(raw_planes, image.u16);
+  std::vector<uint8_t> out{kProfileFast, 0, 0};
+  append_prefixed(out, payload);
+  return out;
+}
+
 bool needs_legacy_planes(const Image& image, const EncodeOptions& opt) {
   if (opt.profile != nullptr && opt.profile[0] != '\0') {
     return std::strcmp(opt.profile, "raw") != 0 && std::strcmp(opt.profile, "palette") != 0 &&
-           std::strcmp(opt.profile, "frontier") != 0;
+           std::strcmp(opt.profile, "frontier") != 0 && std::strcmp(opt.profile, "fast") != 0;
   }
+  if (opt.version >= 3 && opt.effort == 0) return false;
   if (opt.version <= 2) return true;
   for (int y0 = 0; y0 < image.height; y0 += opt.tile) {
     for (int x0 = 0; x0 < image.width; x0 += opt.tile) {
@@ -626,7 +640,11 @@ std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int
     }
     if (std::strcmp(profile, "frontier") == 0) {
       if (version <= 2) throw CodecError("profile frontier requires bitstream version 3");
-      return frontier_record(image, y0, y1, x0, x1, effort);
+      return frontier_record(image, y0, y1, x0, x1, std::max(1, effort));
+    }
+    if (std::strcmp(profile, "fast") == 0) {
+      if (version <= 2) throw CodecError("profile fast requires bitstream version 3");
+      return fast_record(image, y0, y1, x0, x1);
     }
     const std::vector<Plane> planes = apply_color_forward(split_region(image, y0, y1, x0, x1), transform);
     if (std::strcmp(profile, "raster") == 0) return raster_record(planes, false);
@@ -641,6 +659,13 @@ std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int
     }
     throw CodecError(std::string("unknown profile ") + profile);
   }
+  const size_t raw_size =
+      1u + static_cast<size_t>(area) * static_cast<size_t>(image.channels) * static_cast<size_t>(image.u16 ? 2 : 1);
+  if (version >= 3 && effort == 0) {
+    auto fast = fast_record(image, y0, y1, x0, x1);
+    if (fast.size() >= raw_size) return raw_record(image, y0, y1, x0, x1);
+    return fast;
+  }
   std::vector<std::vector<uint8_t>> candidates;
   if (version >= 3) {
     candidates.push_back(frontier_record(image, y0, y1, x0, x1, effort));
@@ -653,8 +678,6 @@ std::vector<uint8_t> encode_tile(const Image& image, int y0, int y1, int x0, int
       candidates.push_back(raster_record(planes, true));
     }
   }
-  const size_t raw_size =
-      1u + static_cast<size_t>(area) * static_cast<size_t>(image.channels) * static_cast<size_t>(image.u16 ? 2 : 1);
   if (candidates.empty()) return raw_record(image, y0, y1, x0, x1);
   auto best = shortest(std::move(candidates));
   if (best.size() >= raw_size) return raw_record(image, y0, y1, x0, x1);
@@ -765,7 +788,7 @@ std::vector<uint8_t> encode_image(const Image& image, const EncodeOptions& opt) 
   if (opt.tile < 8 || opt.tile > 4096) throw CodecError("tile size must be between 8 and 4096");
   if (opt.version != 2 && opt.version != 3) throw CodecError("unsupported bitstream version");
   if (opt.version == 2 && opt.effort != 1 && opt.effort != 2) throw CodecError("version 2 effort must be 1 or 2");
-  if (opt.version == 3 && (opt.effort < 1 || opt.effort > 3)) throw CodecError("effort must be 1, 2, or 3");
+  if (opt.version == 3 && (opt.effort < 0 || opt.effort > 3)) throw CodecError("effort must be 0, 1, 2, or 3");
   const bool use_legacy_planes = needs_legacy_planes(image, opt);
   const ColorTransform transform =
       (image.channels >= 3 && use_legacy_planes)
@@ -879,15 +902,23 @@ Image decode_image(const uint8_t* data, size_t size) {
   const int mode = reader.u8("truncated header");
   const int perm = reader.u8("truncated header");
   const int cflags = reader.u8("truncated header");
-  const int width = static_cast<int>(reader.u32("truncated header"));
-  const int height = static_cast<int>(reader.u32("truncated header"));
+  const uint32_t width_u32 = reader.u32("truncated header");
+  const uint32_t height_u32 = reader.u32("truncated header");
   const uint32_t crc = reader.u32("truncated header");
   const int tile = reader.u16("truncated header");
   if (version != 2 && version != 3) throw CodecError("not a readable vpxc bitstream");
   if ((bps != 1 && bps != 2) || (channels != 1 && channels != 3 && channels != 4)) {
     throw CodecError("unsupported sample format");
   }
-  if (width <= 0 || height <= 0 || tile < 8 || width > 20000 || height > 20000) throw CodecError("invalid geometry");
+  if (width_u32 == 0 || height_u32 == 0 || tile < 8 || tile > 4096 ||
+      width_u32 > static_cast<uint32_t>(kMaxImageDim) || height_u32 > static_cast<uint32_t>(kMaxImageDim)) {
+    throw CodecError("invalid geometry");
+  }
+  const int width = static_cast<int>(width_u32);
+  const int height = static_cast<int>(height_u32);
+  const size_t total_samples = static_cast<size_t>(height) * static_cast<size_t>(width) * static_cast<size_t>(channels);
+  if (total_samples > kMaxImageSamples) throw CodecError("image sample count exceeds safety limit");
+  if (mode < 0 || mode > MODE_WSIL) throw CodecError("invalid color mode");
   ColorTransform transform;
   transform.mode = mode;
   transform.perm = perm;
@@ -922,18 +953,18 @@ Image decode_image(const uint8_t* data, size_t size) {
     transform.extra[1] = reader.i16("truncated 4th-channel color header");
     transform.extra[2] = reader.i16("truncated 4th-channel color header");
   }
-  Image out;
-  out.height = height;
-  out.width = width;
-  out.channels = channels;
-  out.u16 = bps == 2;
-  out.samples.assign(static_cast<size_t>(height) * static_cast<size_t>(width) * static_cast<size_t>(channels), 0);
+  const size_t ntiles_y = static_cast<size_t>((height + tile - 1) / tile);
+  const size_t ntiles_x = static_cast<size_t>((width + tile - 1) / tile);
+  const size_t ntiles = ntiles_y * ntiles_x;
+  if (ntiles > reader.size - reader.pos) throw CodecError("truncated tile");
+
   struct ParsedTile {
     int y0, y1, x0, x1, th, tw;
     int prof, flags, nlevels;
     std::span<const uint8_t> payload;
   };
   std::vector<ParsedTile> ptiles;
+  ptiles.reserve(ntiles);
   bool any_halo_slgf = false;
   for (int y0 = 0; y0 < height; y0 += tile) {
     for (int x0 = 0; x0 < width; x0 += tile) {
@@ -963,6 +994,13 @@ Image decode_image(const uint8_t* data, size_t size) {
   }
   if (reader.pos != reader.size) throw CodecError("trailing bytes after the last tile");
 
+  Image out;
+  out.height = height;
+  out.width = width;
+  out.channels = channels;
+  out.u16 = bps == 2;
+  out.samples.assign(total_samples, 0);
+
   auto decode_one_tile = [&](const ParsedTile& t) {
     if (t.prof == kProfileRaw) {
       store_bytes(out, t.y0, t.y1, t.x0, t.x1, t.payload.data(), t.payload.size());
@@ -991,6 +1029,11 @@ Image decode_image(const uint8_t* data, size_t size) {
       if (version <= 2) throw CodecError("frontier tile requires bitstream version 3");
       if (t.flags != 0 || t.nlevels != 0) throw CodecError("invalid frontier tile header");
       auto planes = decode_frontier(t.payload.data(), t.payload.size(), t.th, t.tw, channels, bps == 2);
+      store_planes(out, t.y0, t.x0, planes);
+    } else if (t.prof == kProfileFast) {
+      if (version <= 2) throw CodecError("fast tile requires bitstream version 3");
+      if (t.flags != 0 || t.nlevels != 0) throw CodecError("invalid fast tile header");
+      auto planes = decode_fast(t.payload.data(), t.payload.size(), t.th, t.tw, channels, bps == 2);
       store_planes(out, t.y0, t.x0, planes);
     } else if (t.prof == kProfilePalette) {
       decode_palette(out, t.y0, t.x0, t.payload, t.th, t.tw, t.flags);
