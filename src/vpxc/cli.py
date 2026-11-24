@@ -23,8 +23,8 @@ def main(argv: list[str] | None = None) -> None:
     enc = sub.add_parser("encode", help="compress an image to a .vpxc file")
     enc.add_argument("input", help="input image path (PNG, TIFF, BMP, JPEG, etc.)")
     enc.add_argument("output", help="output .vpxc bitstream path")
-    enc.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 768)")
-    enc.add_argument("--effort", type=int, default=2, choices=(1, 2, 3), help="search effort (1=fast, 2=trees, 3=SLGF-Max)")
+    enc.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 384)")
+    enc.add_argument("--effort", type=int, default=1, choices=(1, 2, 3), help="search effort (1=fast prior+NLMS, 2=adaptive MAP+MA, 3=frontier max)")
     enc.add_argument("--profile", default=None, choices=PROFILES, help="force a specific coding profile")
 
     dec = sub.add_parser("decode", help="restore an exact image from a .vpxc file")
@@ -33,8 +33,8 @@ def main(argv: list[str] | None = None) -> None:
 
     rnd = sub.add_parser("roundtrip", help="encode, decode, verify bit-identity, and print rate")
     rnd.add_argument("input", help="input image path")
-    rnd.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 768)")
-    rnd.add_argument("--effort", type=int, default=2, choices=(1, 2, 3))
+    rnd.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 384)")
+    rnd.add_argument("--effort", type=int, default=1, choices=(1, 2, 3))
     rnd.add_argument("--profile", default=None, choices=PROFILES)
 
     bench = sub.add_parser(
@@ -46,8 +46,8 @@ def main(argv: list[str] | None = None) -> None:
         nargs="+",
         help="one or more image files or directories of images",
     )
-    bench.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 768)")
-    bench.add_argument("--effort", type=int, default=2, choices=(1, 2, 3))
+    bench.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 384)")
+    bench.add_argument("--effort", type=int, default=1, choices=(1, 2, 3))
     bench.add_argument("--profile", default=None, choices=PROFILES)
     bench.add_argument("--markdown", action="store_true", help="print summary table as Markdown")
 

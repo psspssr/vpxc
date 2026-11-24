@@ -60,7 +60,7 @@ from vpxc.wsil import SL3Params
 MAGIC = b"VPXC"
 VERSION = 3
 VERSIONS = (2, 3)
-TILE = 768
+TILE = 384
 MAX_LEVELS = 4
 MAX_PALETTE_COLORS = 512
 
@@ -86,7 +86,7 @@ def encode(
     image: np.ndarray,
     *,
     tile: int = TILE,
-    effort: int = 2,
+    effort: int = 1,
     profile: str | None = None,
     version: int = VERSION,
 ) -> bytes:
