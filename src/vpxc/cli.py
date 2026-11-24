@@ -11,6 +11,7 @@ import numpy as np
 
 from vpxc.benchmark import CodecResult, benchmark_image, format_benchmark_table
 from vpxc.codec import PROFILES, TILE, decode, encode
+from vpxc.medical import decode_slice, decode_volume, encode_volume, pack_dicom, unpack_dicom
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -24,7 +25,7 @@ def main(argv: list[str] | None = None) -> None:
     enc.add_argument("input", help="input image path (PNG, TIFF, BMP, JPEG, etc.)")
     enc.add_argument("output", help="output .vpxc bitstream path")
     enc.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 384)")
-    enc.add_argument("--effort", type=int, default=1, choices=(1, 2, 3), help="search effort (1=fast prior+NLMS, 2=adaptive MAP+MA, 3=frontier max)")
+    enc.add_argument("--effort", type=int, default=1, choices=(0, 1, 2, 3), help="search effort (0=ultra-fast LUT rANS, 1=fast prior+NLMS, 2=adaptive MAP+MA, 3=frontier max)")
     enc.add_argument("--profile", default=None, choices=PROFILES, help="force a specific coding profile")
 
     dec = sub.add_parser("decode", help="restore an exact image from a .vpxc file")
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> None:
     rnd = sub.add_parser("roundtrip", help="encode, decode, verify bit-identity, and print rate")
     rnd.add_argument("input", help="input image path")
     rnd.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 384)")
-    rnd.add_argument("--effort", type=int, default=1, choices=(1, 2, 3))
+    rnd.add_argument("--effort", type=int, default=1, choices=(0, 1, 2, 3))
     rnd.add_argument("--profile", default=None, choices=PROFILES)
 
     bench = sub.add_parser(
@@ -47,9 +48,19 @@ def main(argv: list[str] | None = None) -> None:
         help="one or more image files or directories of images",
     )
     bench.add_argument("--tile", type=int, default=TILE, help="tile size in pixels (default: 384)")
-    bench.add_argument("--effort", type=int, default=1, choices=(1, 2, 3))
+    bench.add_argument("--effort", type=int, default=1, choices=(0, 1, 2, 3))
     bench.add_argument("--profile", default=None, choices=PROFILES)
     bench.add_argument("--markdown", action="store_true", help="print summary table as Markdown")
+
+    pkd = sub.add_parser("pack-dicom", help="losslessly pack an uncompressed .dcm file to byte-exact .vpxd")
+    pkd.add_argument("input", help="input uncompressed .dcm file")
+    pkd.add_argument("output", help="output .vpxd archive path")
+    pkd.add_argument("--effort", type=int, default=1, choices=(0, 1, 2, 3))
+    pkd.add_argument("--gos", type=int, default=8, help="Group-of-Slices interval (default: 8)")
+
+    upkd = sub.add_parser("unpack-dicom", help="restore a SHA-256 byte-exact .dcm file from .vpxd")
+    upkd.add_argument("input", help="input .vpxd archive path")
+    upkd.add_argument("output", help="output restored .dcm path")
 
     args = parser.parse_args(argv)
     if args.cmd == "encode":
@@ -94,6 +105,23 @@ def main(argv: list[str] | None = None) -> None:
             f"vpxc {len(blob):,} bytes ({rate}){png_info}  "
             f"encode {encode_s:.2f}s  decode {decode_s:.2f}s"
         )
+    elif args.cmd == "pack-dicom":
+        dcm = Path(args.input).read_bytes()
+        started = time.perf_counter()
+        vpxd = pack_dicom(dcm, effort=args.effort, gos_size=args.gos)
+        elapsed = time.perf_counter() - started
+        Path(args.output).write_bytes(vpxd)
+        ratio = len(dcm) / max(1, len(vpxd))
+        print(
+            f"packed {args.input} ({len(dcm):,} B) -> {args.output} ({len(vpxd):,} B, {ratio:.2f}x) in {elapsed:.3f}s"
+        )
+    elif args.cmd == "unpack-dicom":
+        vpxd = Path(args.input).read_bytes()
+        started = time.perf_counter()
+        dcm = unpack_dicom(vpxd)
+        elapsed = time.perf_counter() - started
+        Path(args.output).write_bytes(dcm)
+        print(f"unpacked {args.input} -> {args.output} ({len(dcm):,} B, SHA-256 verified) in {elapsed:.3f}s")
     else:
         paths = _collect_images(args.inputs)
         if not paths:

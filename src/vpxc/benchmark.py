@@ -351,6 +351,132 @@ def benchmark_image(
     return results
 
 
+def benchmark_volume(
+    volume: np.ndarray,
+    *,
+    gos_size: int = 8,
+    include_external: bool = True,
+) -> list[CodecResult]:
+    """Benchmark 3D medical ``vpxc`` (``VPXV``) against slice-by-slice 2D medical codecs.
+
+    Supports ``uint8``, ``uint16``, and signed ``int16`` (Hounsfield Units). For
+    signed ``int16`` volumes, unsigned-only 2D codecs (``PNG``, ``JPEG-LS``,
+    ``JPEG XL``) receive steelmanned ``uint16`` slices shifted by ``-vol.min()``
+    (equivalent to DICOM ``RescaleIntercept``) plus a 2-byte bias header, and
+    are verified bit-exact after inverse bias restoration.
+    """
+    from vpxc.medical import decode_volume, encode_volume
+
+    src = np.ascontiguousarray(volume)
+    if src.ndim != 3 or src.dtype not in (np.uint8, np.uint16, np.int16):
+        raise ValueError("benchmark_volume expects a (Z, H, W) uint8, uint16, or int16 array")
+
+    voxels = int(src.size)
+    raw_n = _raw_bytes(src)
+    results: list[CodecResult] = []
+
+    for eff, label in (
+        (0, f"vpxc 3D (-e 0, GoS={gos_size})"),
+        (1, f"vpxc 3D (-e 1, GoS={gos_size})"),
+        (2, f"vpxc 3D (-e 2, GoS={gos_size})"),
+    ):
+        t0 = time.perf_counter()
+        blob = encode_volume(src, effort=eff, gos_size=gos_size)
+        enc_ms = (time.perf_counter() - t0) * 1000.0
+        t0 = time.perf_counter()
+        back = decode_volume(blob)
+        dec_ms = (time.perf_counter() - t0) * 1000.0
+        if back.shape != src.shape or back.dtype != src.dtype or not np.array_equal(back, src):
+            raise RuntimeError(f"{label} lossless verification failed")
+        bpsp = 8.0 * len(blob) / voxels
+        results.append(
+            CodecResult(
+                codec=label,
+                nbytes=len(blob),
+                bpsp=bpsp,
+                bpp=bpsp,
+                ratio=raw_n / max(1, len(blob)),
+                encode_ms=enc_ms,
+                decode_ms=dec_ms,
+            )
+        )
+
+    # Prepared unsigned view for 2D codecs that require uint8/uint16
+    bias = 0
+    if src.dtype == np.int16:
+        vmin = int(src.min())
+        vmax = int(src.max())
+        if vmax - vmin <= 65535:
+            bias = vmin
+            u_vol = (src.astype(np.int32) - bias).astype(np.uint16)
+        else:
+            u_vol = src.view(np.uint16) ^ np.uint16(0x8000)
+            bias = 0x80000000
+    else:
+        u_vol = src
+
+    for eff2d, lbl2d in ((0, "vpxc 2D (-e 0, fast)"), (1, "vpxc 2D (-e 1)")):
+        total_b = 2 if src.dtype == np.int16 else 0
+        enc_ms = 0.0
+        dec_ms = 0.0
+        for z in range(u_vol.shape[0]):
+            b, bk, em, dm = _run_vpxc(u_vol[z], effort=eff2d)
+            if not np.array_equal(bk, u_vol[z]):
+                raise RuntimeError(f"{lbl2d} slice {z} lossless check failed")
+            total_b += len(b) + 4
+            enc_ms += em
+            dec_ms += dm
+        bpsp = 8.0 * total_b / voxels
+        results.append(
+            CodecResult(
+                codec=lbl2d,
+                nbytes=total_b,
+                bpsp=bpsp,
+                bpp=bpsp,
+                ratio=raw_n / max(1, total_b),
+                encode_ms=enc_ms,
+                decode_ms=dec_ms,
+            )
+        )
+
+    if include_external:
+        for name, runner in _discover_external_runners():
+            total_b = 2 if src.dtype == np.int16 else 0
+            enc_ms = 0.0
+            dec_ms = 0.0
+            ok = True
+            for z in range(u_vol.shape[0]):
+                # OpenJPEG supports int16 natively; test native int16 if applicable, else steelmanned u_vol
+                sl_in = src[z] if (src.dtype == np.int16 and name.startswith("JPEG 2000")) else u_vol[z]
+                out = runner(sl_in)
+                if out is None:
+                    ok = False
+                    break
+                b, bk, em, dm = out
+                if bk.shape != sl_in.shape or not np.array_equal(bk, sl_in):
+                    ok = False
+                    break
+                total_b += len(b) + 4
+                enc_ms += em
+                dec_ms += dm
+            if ok:
+                bpsp = 8.0 * total_b / voxels
+                results.append(
+                    CodecResult(
+                        codec=f"{name} (2D)",
+                        nbytes=total_b,
+                        bpsp=bpsp,
+                        bpp=bpsp,
+                        ratio=raw_n / max(1, total_b),
+                        encode_ms=enc_ms,
+                        decode_ms=dec_ms,
+                    )
+                )
+
+    results.sort(key=lambda item: item.bpsp)
+    return results
+
+
 def format_benchmark_table(
     results: list[CodecResult], *, markdown: bool = False
 ) -> str:
