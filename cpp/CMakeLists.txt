@@ -33,6 +33,8 @@ add_library(vpxc STATIC
   src/slgf_v3.cpp
   src/wp.cpp
   src/frontier.cpp
+  src/fast_codec.cpp
+  src/medical.cpp
   src/codec.cpp
 )
 find_package(Threads REQUIRED)
@@ -40,10 +42,20 @@ target_include_directories(vpxc PUBLIC include)
 target_link_libraries(vpxc PUBLIC z Threads::Threads)
 target_compile_options(vpxc PRIVATE -Wall -Wextra)
 if(VPXC_NATIVE_ARCH AND COMPILER_SUPPORTS_MARCH_NATIVE)
-  target_compile_options(vpxc PRIVATE -march=native)
+  target_compile_options(vpxc PUBLIC -march=native)
 endif()
 set_target_properties(vpxc PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(vpxc_native SHARED src/c_api.cpp)
 target_link_libraries(vpxc_native PRIVATE vpxc)
 set_target_properties(vpxc_native PROPERTIES OUTPUT_NAME vpxc_native)
+
+option(VPXC_BUILD_FUZZER "Build libFuzzer + ASan + UBSan fuzz_decode target (requires Clang)" OFF)
+if(VPXC_BUILD_FUZZER)
+  add_executable(vpxc_fuzz_decode fuzz/fuzz_decode.cpp)
+  target_include_directories(vpxc_fuzz_decode PRIVATE include)
+  target_compile_definitions(vpxc_fuzz_decode PRIVATE VPXC_FUZZ_MAX_SAMPLES=1048576)
+  target_compile_options(vpxc_fuzz_decode PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -g -O2)
+  target_link_options(vpxc_fuzz_decode PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
+  target_link_libraries(vpxc_fuzz_decode PRIVATE vpxc)
+endif()
